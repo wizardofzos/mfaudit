@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mfaudit"
-version = "0.1.1"
+version = "0.1.2"
 description = "Automated RACF security auditing — CIS Benchmarks"
 readme = "README.md"
 license = { text = "AGPL-3.0-or-later" }
 authors = [
-    { name = "Wizard of z/OS", email = "henri@mainframesociety.com" }
+    { name = "Wizard of z/OS", email = "henri@mainframesociety.com" },
+    { name = "Martydog", email = "martydog.nl@gmail.com"}
 ]
 keywords = ["racf", "zos", "mainframe", "security", "audit", "cis", "stig"]
 classifiers = [
