@@ -1,12 +1,20 @@
 # Report output
 
-`mfaudit` writes two output files after every run. By default both land in the current directory; use `--out DIR` to choose a different location.
+`mfaudit` writes output files after every run. By default all outputs are written to the current directory; use `--out DIR` to choose a different location.
+
+The generated outputs depend on the selected `--format` value.
 
 ---
 
 ## PDF report — `report.pdf`
 
-The primary output. Open it in any PDF viewer.
+Generated when `PDF` is included in `--format`.
+
+```bash
+mfaudit --controls controls.yaml --format PDF
+```
+
+The primary human-readable output. Open it in any PDF viewer.
 
 ### Structure
 
@@ -14,7 +22,7 @@ The primary output. Open it in any PDF viewer.
 
 - System name and report date
 - Summary counts: total controls, PASS / FAIL / REVIEW / SKIP / ERROR
-- Overall risk rating
+- Overall compliance score
 
 **Per-benchmark sections**
 
@@ -37,11 +45,17 @@ Each section lists controls in order with:
 
 **Finding detail**
 
-FAIL and REVIEW controls expand to show the raw finding rows — the actual RACF records that triggered the verdict. Column names are the mfpandas DataFrame column names.
+FAIL and REVIEW controls expand to show the raw finding rows — the actual RACF records that triggered the verdict. Column names are the native mfpandas DataFrame column names.
 
 ### PDF library installation
 
-WeasyPrint is installed automatically with `pip install mfaudit` and is the preferred PDF engine. It requires a small set of native system libraries:
+WeasyPrint is installed automatically with:
+
+```bash
+pip install mfaudit
+```
+
+It is the preferred PDF engine and requires a small set of native system libraries.
 
 === "macOS"
 
@@ -59,41 +73,120 @@ WeasyPrint is installed automatically with `pip install mfaudit` and is the pref
 
 === "Windows"
 
-    Install the [GTK3 runtime](https://github.com/tschoonj/GTK-for-Windows-Runtime-Environment-Installer/releases)
-    and add its `bin` directory to `PATH`.
+    Install the GTK3 runtime:
 
-    Or skip WeasyPrint and use xhtml2pdf — no extra native libraries needed:
-    `pip install "mfaudit[pdf-xhtml]"`
+    https://github.com/tschoonj/GTK-for-Windows-Runtime-Environment-Installer/releases
 
-If WeasyPrint is unavailable, MFAudit automatically falls back to xhtml2pdf (if installed via `pip install "mfaudit[pdf-xhtml]"`).
+    Then add the GTK `bin` directory to `PATH`.
+
+    Or skip WeasyPrint and use xhtml2pdf instead:
+
+    ```bash
+    pip install "mfaudit[pdf-xhtml]"
+    ```
+
+If WeasyPrint is unavailable, MFAudit automatically falls back to xhtml2pdf (when installed).
 
 ---
 
-## CSV — `controls_results.csv`
+## CSV export — `controls_results.csv`
 
-One row per control. Useful for importing into spreadsheets, dashboards, or ticketing systems.
+Generated when `CSV` is included in `--format`.
+
+```bash
+mfaudit --controls controls.yaml --format CSV
+```
+
+One row per control. Useful for spreadsheets, dashboards, SIEM ingestion, ticketing systems, or audit evidence tracking.
 
 | Column | Content |
 |---|---|
 | `control_id` | Stable control identifier |
 | `title` | Control title |
-| `severity` | `high` / `medium` / `low` |
+| `cis_section` | CIS section identifier |
+| `severity` | `HIGH` / `MEDIUM` / `LOW` |
 | `status` | `PASS` / `FAIL` / `REVIEW` / `SKIP` / `ERROR` |
 | `detail` | One-line verdict summary |
 | `data_sources` | Comma-separated list of required sources |
-| `benchmark` | Source benchmark name |
+| `stig_rule_id` | Linked STIG rule identifier if present |
+
+---
+
+## JSON export — `controls_results.json`
+
+Generated when `JSON` is included in `--format`.
+
+```bash
+mfaudit --controls controls.yaml --format JSON
+```
+
+The JSON export contains the same control-level data as the CSV output, but structured as JSON objects for easier automation and ingestion into APIs, Splunk, Elastic, SIEM pipelines, dashboards, or custom tooling.
+
+Example structure:
+
+```json
+[
+  {
+    "control_id": "1.1.1",
+    "title": "Verify PASSWORD interval",
+    "cis_section": "1.1",
+    "severity": "HIGH",
+    "status": "PASS",
+    "detail": "PASSWORD interval compliant",
+    "data_sources": [
+      "setropts"
+    ],
+    "stig_rule_id": "RACF-0001"
+  }
+]
+```
+
+---
+
+## Multiple output formats
+
+Formats can be combined using comma-separated values:
+
+```bash
+mfaudit --controls controls.yaml --format CSV,JSON,PDF
+```
+
+Supported values:
+
+| Format | Output |
+|---|---|
+| `PDF` | `report.pdf` |
+| `CSV` | `controls_results.csv` |
+| `JSON` | `controls_results.json` |
+
+Default behavior:
+
+```bash
+--format CSV,PDF
+```
 
 ---
 
 ## Anonymized reports
 
-Pass `--anonymize` to replace all RACF user IDs, group names, and profile names with stable pseudonymous labels (`USR-0001`, `GRP-0042`, etc.) before writing output. The mapping is deterministic within a single run — the same name always gets the same label, so findings remain interpretable.
+Pass `--anonymize` to replace all RACF user IDs, group names, and profile names with stable pseudonymous labels (`USR-0001`, `GRP-0042`, etc.) before writing output.
 
 ```bash
-mfaudit --controls controls.yaml --anonymize --out out/
+mfaudit --controls controls.yaml \
+         --format CSV,JSON,PDF \
+         --anonymize \
+         --out out/
 ```
 
-Useful when sharing reports with external auditors or vendors without disclosing internal naming conventions.
+The mapping is deterministic within a single run — the same identifier always resolves to the same anonymized label, keeping findings readable while preventing disclosure of internal naming conventions.
+
+Useful when sharing reports with:
+
+- external auditors;
+- vendors;
+- penetration testers;
+- compliance assessors;
+- third parties.
 
 ---
 
@@ -105,47 +198,65 @@ Two templates ship with MFAudit:
 
 | Template | Style |
 |---|---|
-| `templates/default-report.html.j2` | Light corporate theme — the default |
+| `templates/default-report.html.j2` | Light corporate theme — default |
 | `templates/terminal-report.html.j2` | Dark phosphor-green 3270-style terminal theme |
 
-Use the terminal theme by short name:
+Use the terminal theme:
 
 ```bash
 mfaudit --controls controls.yaml --template terminal
 ```
 
-See all available names:
+List available templates:
 
 ```bash
 mfaudit --list-templates
 ```
 
-Or point at any local `.html.j2` file you have written or edited:
+Or use a custom local template:
 
 ```bash
-mfaudit --controls controls.yaml --template /path/to/my-report.html.j2
+mfaudit --controls controls.yaml \
+         --template /path/to/my-report.html.j2
 ```
 
 ### Writing your own template
 
-The template is a standard Jinja2 HTML file rendered to a string, then handed to WeasyPrint. All styles should be inline (`<style>` in `<head>`) so there is no external CSS dependency.
+Templates are standard Jinja2 HTML files rendered to HTML and then converted to PDF.
 
-The following variables are available in every template:
+Inline CSS is recommended (`<style>` inside `<head>`) to avoid external stylesheet dependencies.
+
+Available template variables:
 
 | Variable | Type | Content |
 |---|---|---|
 | `system_name` | str | Value of `--system-name` |
-| `report_date` | str | Value of `--report-date` (or today) |
-| `generated_at` | str | Timestamp of the run |
+| `report_date` | str | Value of `--report-date` |
+| `generated_at` | str | Runtime timestamp |
 | `controls_file` | str | Controls file(s) used |
 | `total` | int | Total control count |
 | `passed` / `failed` / `review` / `skipped` / `errors` | int | Per-status counts |
 | `score_pct` | int | `passed / (total - skipped) × 100` |
-| `results` | list | One dict per control (see below) |
+| `results` | list | One dict per control |
 | `sections` | dict | Results grouped by section/category |
-| `anonymized` | bool | True if `--anonymize` was passed |
+| `anonymized` | bool | True if `--anonymize` was used |
 | `STATUS_PASS` … `STATUS_ERROR` | str | Status string constants |
 
-Each entry in `results` has: `control_id`, `title`, `cis_section`, `cis_level`, `custom_benchmark`, `custom_category`, `custom_reference`, `severity`, `requirement`, `remediation`, `data_sources_needed`, `status`, `detail`, `findings` (list of dicts).
+Each entry in `results` contains:
 
-Start from one of the bundled templates and modify to taste.
+- `control_id`
+- `title`
+- `cis_section`
+- `cis_level`
+- `custom_benchmark`
+- `custom_category`
+- `custom_reference`
+- `severity`
+- `requirement`
+- `remediation`
+- `data_sources_needed`
+- `status`
+- `detail`
+- `findings`
+
+Start from one of the bundled templates and customize as needed.

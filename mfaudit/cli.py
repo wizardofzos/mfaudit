@@ -45,12 +45,20 @@ Flags:
                 Use this to produce a report safe for external sharing.
 
 Outputs:
-  <out>/report.pdf
-  <out>/controls_results.csv
+  --format PDF   -> <out>/report.pdf
+  --format CSV   -> <out>/controls_results.csv
+  --format JSON  -> <out>/controls_results.json
+
+Format examples:
+  --format CSV
+  --format PDF
+  --format JSON
+  --format CSV,JSON,PDF
 """
 
 import argparse
 import csv
+import json
 import os
 import platform
 import sys
@@ -119,6 +127,10 @@ def parse_args():
                    help="Mask user IDs, group names, and profile names in findings "
                         "so the report can be shared externally without exposing "
                         "account names. Pass/Fail results and counts are unchanged.")
+
+    p.add_argument("--format", required=False, default="CSV,PDF",
+                   metavar="CSV,PDF,JSON",
+                   help="Output format(s), comma separated: CSV, PDF, JSON")
     return p.parse_args()
 
 
@@ -537,8 +549,14 @@ def run_control(control, setropts, irrdbu00, dcollect):
 # ──────────────────────────────────────────────────────────────────────────────
 
 def render_report(results, system_name, report_date, out_dir, controls_path,
-                  anonymized=False, template_path=None):
-    """Render PDF + CSV from results list."""
+                  anonymized=False, template_path=None, output_formats="CSV,PDF"):
+    """Render PDF + CSV + JSON from results list."""
+
+    formats = {
+        f.strip().upper()
+        for f in output_formats.split(",")
+        if f.strip()
+    }
     if template_path:
         tp = Path(template_path)
         env = Environment(loader=FileSystemLoader(str(tp.parent)), autoescape=False)
@@ -590,63 +608,100 @@ def render_report(results, system_name, report_date, out_dir, controls_path,
     html = template.render(**context)
 
     # PDF — try WeasyPrint first, fall back to xhtml2pdf
-    pdf_path = Path(out_dir) / "report.pdf"
-    css_path = Path(__file__).parent / "assets" / "report.css"
-    _pdf_written = False
+    if "PDF" in formats:
+        pdf_path = Path(out_dir) / "report.pdf"
+        css_path = Path(__file__).parent / "assets" / "report.css"
+        _pdf_written = False
 
-    try:
-        from weasyprint import HTML as WP_HTML
-        WP_HTML(string=html).write_pdf(
-            str(pdf_path),
-            stylesheets=[str(css_path)] if css_path.exists() else []
-        )
-        print(f"[+] PDF report written to {pdf_path}  (engine: WeasyPrint)")
-        _pdf_written = True
-    except Exception as wp_exc:
-        print(f"[~] WeasyPrint unavailable ({type(wp_exc).__name__}), trying xhtml2pdf ...")
-
-    if not _pdf_written:
         try:
-            from xhtml2pdf import pisa
-            # Embed CSS inline so xhtml2pdf can find it (it doesn't follow relative links)
-            css_inline = ""
-            if css_path.exists():
-                css_inline = f"<style>{css_path.read_text(encoding='utf-8')}</style>"
-            html_for_xhtml = html.replace(
-                '<link rel="stylesheet" href="../assets/report.css">',
-                css_inline,
+            from weasyprint import HTML as WP_HTML
+            WP_HTML(string=html).write_pdf(
+                str(pdf_path),
+                stylesheets=[str(css_path)] if css_path.exists() else []
             )
-            with open(pdf_path, "wb") as pdf_fh:
-                result = pisa.CreatePDF(html_for_xhtml, dest=pdf_fh)
-            if result.err:
-                print(f"[!] xhtml2pdf reported errors (PDF may still be usable): {result.err}")
-            else:
-                print(f"[+] PDF report written to {pdf_path}  (engine: xhtml2pdf)")
+            print(f"[+] PDF report written to {pdf_path}  (engine: WeasyPrint)")
             _pdf_written = True
-        except Exception as px_exc:
-            print(f"[!] PDF generation failed with both engines.")
-            print(f"    WeasyPrint: install system libs — see README for OS-specific steps.")
-            print(f"    xhtml2pdf:  {px_exc}")
+        except Exception as wp_exc:
+            print(f"[~] WeasyPrint unavailable ({type(wp_exc).__name__}), trying xhtml2pdf ...")
+
+        if not _pdf_written:
+            try:
+                from xhtml2pdf import pisa
+                # Embed CSS inline so xhtml2pdf can find it (it doesn't follow relative links)
+                css_inline = ""
+                if css_path.exists():
+                    css_inline = f"<style>{css_path.read_text(encoding='utf-8')}</style>"
+                html_for_xhtml = html.replace(
+                    '<link rel="stylesheet" href="../assets/report.css">',
+                    css_inline,
+                )
+                with open(pdf_path, "wb") as pdf_fh:
+                    result = pisa.CreatePDF(html_for_xhtml, dest=pdf_fh)
+                if result.err:
+                    print(f"[!] xhtml2pdf reported errors (PDF may still be usable): {result.err}")
+                else:
+                    print(f"[+] PDF report written to {pdf_path}  (engine: xhtml2pdf)")
+                _pdf_written = True
+            except Exception as px_exc:
+                print(f"[!] PDF generation failed with both engines.")
+                print(f"    WeasyPrint: install system libs — see README for OS-specific steps.")
+                print(f"    xhtml2pdf:  {px_exc}")
 
     # CSV
-    csv_path = Path(out_dir) / "controls_results.csv"
-    with open(csv_path, "w", newline="", encoding="utf-8") as fh:
-        fields = ["control_id", "title", "cis_section", "severity", "status",
-                  "detail", "data_sources", "stig_rule_id"]
-        writer = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
-        writer.writeheader()
+    if "CSV" in formats:
+        csv_path = Path(out_dir) / "controls_results.csv"
+
+        with open(csv_path, "w", newline="", encoding="utf-8") as fh:
+            fields = [
+                "control_id",
+                "title",
+                "cis_section",
+                "severity",
+                "status",
+                "detail",
+                "data_sources",
+                "stig_rule_id",
+            ]
+
+            writer = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
+            writer.writeheader()
+
+            for r in results:
+                writer.writerow({
+                    "control_id": r.get("control_id", ""),
+                    "title": r.get("title", ""),
+                    "cis_section": r.get("cis_section", ""),
+                    "severity": r.get("severity", ""),
+                    "status": r.get("status", ""),
+                    "detail": r.get("detail", ""),
+                    "data_sources": ",".join(r.get("data_sources_needed", [])),
+                    "stig_rule_id": r.get("stig_rule_id", ""),
+                })
+
+        print(f"[+] CSV results written to {csv_path}")
+
+    # JSON
+    if "JSON" in formats:
+        json_path = Path(out_dir) / "controls_results.json"
+
+        json_results = []
+
         for r in results:
-            writer.writerow({
-                "control_id":    r.get("control_id", ""),
-                "title":         r.get("title", ""),
-                "cis_section":   r.get("cis_section", ""),
-                "severity":      r.get("severity", ""),
-                "status":        r.get("status", ""),
-                "detail":        r.get("detail", ""),
-                "data_sources":  ",".join(r.get("data_sources_needed", [])),
-                "stig_rule_id":  r.get("stig_rule_id", ""),
+            json_results.append({
+                "control_id": r.get("control_id", ""),
+                "title": r.get("title", ""),
+                "cis_section": r.get("cis_section", ""),
+                "severity": r.get("severity", ""),
+                "status": r.get("status", ""),
+                "detail": r.get("detail", ""),
+                "data_sources": r.get("data_sources_needed", []),
+                "stig_rule_id": r.get("stig_rule_id", ""),
             })
-    print(f"[+] CSV results written to {csv_path}")
+
+        with open(json_path, "w", encoding="utf-8") as fh:
+            json.dump(json_results, fh, indent=2)
+
+        print(f"[+] JSON results written to {json_path}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -860,7 +915,9 @@ def main():
 
     # Render outputs
     render_report(results, args.system_name, report_date, out_dir, controls_label,
-                  anonymized=args.anonymize, template_path=args.template)
+                  anonymized=args.anonymize,
+                  template_path=args.template,
+                  output_formats=args.format)
     print("\nDone.")
 
 
