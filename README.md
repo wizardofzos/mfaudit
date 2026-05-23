@@ -1,5 +1,7 @@
 # MFAudit
 
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/mfaudit?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/mfaudit)
+
 **Automated RACF security auditing — from raw RACF exports to audit-ready reports in a single command.**
 
 MFAudit reads standard z/OS security exports — IRRDBU00 unloads and SETROPTS REXX exports — and evaluates them against CIS Benchmark, STIG, and custom RACF security controls.
