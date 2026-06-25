@@ -37,17 +37,12 @@ The result:
 # 1  Install MFAudit
 pip install mfaudit
 
-# 2  Clone the repository to get the controls library
-git clone https://github.com/wizardofzos/mfaudit.git
-cd mfaudit
-
-# 3  Run the audit
+# 2  Run the audit (bundled CIS controls used by default)
 mfaudit \
   --irrdbu00 /path/to/IRRDBU00 \
-  --setropts /path/to/SETROPTS \
-  --controls controls.yaml
+  --setropts /path/to/SETROPTS
 
-# 4  Open the report
+# 3  Open the report
 open report.pdf             # macOS
 xdg-open report.pdf         # Linux
 start report.pdf            # Windows
@@ -68,7 +63,7 @@ Controls requiring unavailable data sources are automatically marked as `SKIP`.
 ### Default outputs
 
 ```bash
-mfaudit --controls controls.yaml
+mfaudit
 ```
 
 Generated files:
@@ -81,8 +76,7 @@ controls_results.csv
 ### JSON output
 
 ```bash
-mfaudit --controls controls.yaml \
-         --format JSON
+mfaudit --format JSON
 ```
 
 Generated file:
@@ -94,8 +88,7 @@ controls_results.json
 ### Multiple output formats
 
 ```bash
-mfaudit --controls controls.yaml \
-         --format CSV,JSON,PDF
+mfaudit --format CSV,JSON,PDF
 ```
 
 Generated files:
@@ -229,8 +222,7 @@ Bundled templates:
 Example:
 
 ```bash
-mfaudit --controls controls.yaml \
-         --template terminal
+mfaudit --template terminal
 ```
 
 List available templates:
@@ -246,8 +238,7 @@ mfaudit --list-templates
 Generate reports safe for external sharing:
 
 ```bash
-mfaudit --controls controls.yaml \
-         --format CSV,JSON,PDF \
+mfaudit --format CSV,JSON,PDF \
          --anonymize
 ```
 

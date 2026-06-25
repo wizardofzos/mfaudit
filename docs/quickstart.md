@@ -57,12 +57,7 @@ WeasyPrint is installed automatically and used for PDF generation.
 
 See the installation guide for required native libraries on Linux/macOS/Windows.
 
-Clone the repository to get the bundled controls library and templates:
-
-```bash
-git clone https://github.com/wizardofzos/mfaudit.git
-cd mfaudit
-```
+The bundled CIS controls library is included in the package — no extra steps needed.
 
 ---
 
@@ -72,10 +67,10 @@ Place `IRRDBU00` and `SETROPTS` in the project root directory, or pass explicit 
 
 ### Minimal run
 
-Outputs are written to the current directory.
+Outputs are written to the current directory. Bundled CIS controls are used automatically.
 
 ```bash
-mfaudit --controls controls.yaml
+mfaudit
 ```
 
 Default outputs:
@@ -86,8 +81,7 @@ Default outputs:
 ### JSON output
 
 ```bash
-mfaudit --controls controls.yaml \
-         --format JSON
+mfaudit --format JSON
 ```
 
 Output:
@@ -97,8 +91,7 @@ Output:
 ### Multiple output formats
 
 ```bash
-mfaudit --controls controls.yaml \
-         --format CSV,JSON,PDF
+mfaudit --format CSV,JSON,PDF
 ```
 
 Outputs:
@@ -112,7 +105,6 @@ Outputs:
 ```bash
 mfaudit --irrdbu00 /data/IRRDBU00 \
          --setropts  /data/SETROPTS \
-         --controls  controls.yaml \
          --system-name SYSA \
          --report-date 2026-05-17 \
          --format CSV,JSON,PDF \
@@ -124,8 +116,7 @@ mfaudit --irrdbu00 /data/IRRDBU00 \
 Replace RACF user IDs, groups, and profile names with stable labels before writing output:
 
 ```bash
-mfaudit --controls controls.yaml \
-         --format CSV,JSON,PDF \
+mfaudit --format CSV,JSON,PDF \
          --anonymize \
          --out out/
 ```
@@ -177,7 +168,8 @@ out/controls_results.json
 ## What you see on the console
 
 ```text
-[+] Loaded 46 control(s) from controls.yaml
+[i] No --controls specified; using bundled controls from .../mfaudit/controls
+[+] Loaded 46 control(s) from .../mfaudit/controls/controls.yaml
 [+] Total: 46 control(s)
 
 [+] Loading SETROPTS from SETROPTS
