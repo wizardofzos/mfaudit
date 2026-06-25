@@ -40,14 +40,10 @@ The result:
 # 2  Install MFAudit
 pip install mfaudit
 
-# 3  Clone the repository to get the controls library
-git clone https://github.com/wizardofzos/mfaudit.git
-cd mfaudit
+# 3  Run the audit (bundled CIS controls used by default)
+mfaudit
 
-# 4  Run the audit
-mfaudit --controls controls.yaml
-
-# 5  Open the PDF report
+# 4  Open the PDF report
 open report.pdf             # macOS
 xdg-open report.pdf         # Linux
 start report.pdf            # Windows
@@ -70,7 +66,7 @@ MFAudit supports multiple output formats simultaneously.
 ### Default outputs
 
 ```bash
-mfaudit --controls controls.yaml
+mfaudit
 ```
 
 Generated files:
@@ -83,8 +79,7 @@ controls_results.csv
 ### JSON output
 
 ```bash
-mfaudit --controls controls.yaml \
-         --format JSON
+mfaudit --format JSON
 ```
 
 Generated files:
@@ -96,8 +91,7 @@ controls_results.json
 ### All output formats
 
 ```bash
-mfaudit --controls controls.yaml \
-         --format CSV,JSON,PDF
+mfaudit --format CSV,JSON,PDF
 ```
 
 Generated files:
@@ -140,8 +134,7 @@ z/OS system
 Generate reports safe for external sharing:
 
 ```bash
-mfaudit --controls controls.yaml \
-         --format CSV,JSON,PDF \
+mfaudit --format CSV,JSON,PDF \
          --anonymize
 ```
 
@@ -181,8 +174,7 @@ Bundled report templates:
 Example:
 
 ```bash
-mfaudit --controls controls.yaml \
-         --template terminal
+mfaudit --template terminal
 ```
 
 List available templates:

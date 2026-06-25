@@ -8,16 +8,11 @@
 mfaudit [options]
 ```
 
-### Required arguments
-
-| Argument | Description |
-|---|---|
-| `--controls FILE [FILE …]` | One or more controls YAML files. Controls from all files are merged before execution. |
-
 ### Optional arguments
 
 | Argument | Default | Description |
 |---|---|---|
+| `--controls FILE [FILE …]` | bundled controls | One or more controls YAML files. Controls from all files are merged before execution. Defaults to all YAML files bundled with the package (`mfaudit/controls/`). Run `--list-controls` to see the bundled paths. |
 | `--out DIR` | current directory | Output directory. Created automatically if it does not exist. |
 | `--irrdbu00 PATH` | `./IRRDBU00` | Path to the IRRDBU00 database unload. |
 | `--setropts PATH` | `./SETROPTS` | Path to the REXX-produced SETROPTS export. |

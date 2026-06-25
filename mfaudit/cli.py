@@ -109,6 +109,7 @@ def parse_args():
                    help="DCOLLECT unload file (optional)")
     p.add_argument("--controls",     required=False, metavar="FILE", nargs="+",
                    help="Controls definition file(s); repeat or space-separate to merge multiple YAML files. "
+                        "Defaults to the bundled controls when omitted. "
                         "Run --list-controls to see bundled file paths.")
     p.add_argument("--list-controls", action="store_true",
                    help="Print paths of the bundled controls YAML files and exit.")
@@ -786,8 +787,13 @@ def main():
         sys.exit(0)
 
     if not args.controls:
-        print("[!] --controls is required. Use --list-controls to see bundled file paths.", file=sys.stderr)
-        sys.exit(1)
+        default_controls = sorted(_BUNDLED_CONTROLS.glob("*.yaml"))
+        if default_controls:
+            args.controls = [str(p) for p in default_controls]
+            print(f"[i] No --controls specified; using bundled controls from {_BUNDLED_CONTROLS}")
+        else:
+            print("[!] --controls is required. Use --list-controls to see bundled file paths.", file=sys.stderr)
+            sys.exit(1)
 
     # Validate controls file(s)
     controls_paths = [Path(p) for p in args.controls]
