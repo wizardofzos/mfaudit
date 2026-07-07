@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>RACF Security Audit - {{ system_name }}</title>
+  <style>
+    @page {
+      size: A4 portrait;
+      margin: 15mm 13mm 16mm 13mm;
+    }
+    body {
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 9pt;
+      line-height: 1.35;
+      color: #202938;
+      background: #ffffff;
+    }
+    .page-break { page-break-after: always; }
+    .cover {
+      border-top: 14pt solid #173f63;
+      padding: 30pt 24pt;
+    }
+    .brand {
+      color: #1a5276;
+      font-size: 13pt;
+      font-weight: bold;
+      margin-bottom: 45pt;
+    }
+    h1 {
+      color: #173f63;
+      font-size: 28pt;
+      line-height: 1.1;
+      margin: 0 0 8pt 0;
+    }
+    .subtitle {
+      color: #61758a;
+      font-size: 11pt;
+      margin-bottom: 30pt;
+    }
+    .cover-meta {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 32pt;
+    }
+    .cover-meta th {
+      width: 30%;
+      padding: 6pt 8pt;
+      text-align: left;
+      color: #1a5276;
+      background: #edf3f8;
+      border-bottom: 1pt solid #d6e0e8;
+    }
+    .cover-meta td {
+      padding: 6pt 8pt;
+      border-bottom: 1pt solid #d6e0e8;
+    }
+    .score {
+      width: 42%;
+      border-collapse: collapse;
+      margin-top: 12pt;
+    }
+    .score td {
+      padding: 12pt;
+      text-align: center;
+      background: #edf3f8;
+      border: 2pt solid #1a5276;
+    }
+    .score-number {
+      font-size: 28pt;
+      font-weight: bold;
+      color: #1a5276;
+    }
+    .score-label {
+      font-size: 8pt;
+      color: #61758a;
+      text-transform: uppercase;
+    }
+    .disclaimer {
+      margin-top: 35pt;
+      color: #6b7785;
+      font-size: 8pt;
+    }
+    .section {
+      padding: 4pt;
+    }
+    h2 {
+      color: #1a5276;
+      font-size: 17pt;
+      border-bottom: 2pt solid #1a5276;
+      padding-bottom: 5pt;
+      margin: 0 0 14pt 0;
+    }
+    h3 {
+      color: #202938;
+      font-size: 12pt;
+      margin: 18pt 0 8pt 0;
+    }
+    .summary {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 3pt;
+      margin-bottom: 16pt;
+    }
+    .summary td {
+      width: 20%;
+      padding: 10pt 3pt;
+      text-align: center;
+      border: 1pt solid #d6e0e8;
+    }
+    .summary-number {
+      font-size: 18pt;
+      font-weight: bold;
+    }
+    .summary-label {
+      font-size: 7pt;
+      font-weight: bold;
+    }
+    .sum-pass { background: #e8f5ee; color: #1b7f3e; }
+    .sum-fail { background: #fdecea; color: #b33428; }
+    .sum-review { background: #fef3e8; color: #b94a00; }
+    .sum-skip { background: #f0f0f0; color: #606a73; }
+    .sum-error { background: #f5eaf5; color: #74377c; }
+    table.overview {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 7.5pt;
+    }
+    .overview th {
+      color: #ffffff;
+      background: #204667;
+      padding: 6pt 4pt;
+      text-align: left;
+      border: 1pt solid #204667;
+    }
+    .overview td {
+      padding: 5pt 4pt;
+      vertical-align: top;
+      border-bottom: 1pt solid #d9e1e8;
+    }
+    .overview .center { text-align: center; }
+    .row-pass { border-left: 3pt solid #1b7f3e; }
+    .row-fail { border-left: 3pt solid #c0392b; }
+    .row-review { border-left: 3pt solid #d35400; }
+    .row-skip { border-left: 3pt solid #6c757d; }
+    .row-error { border-left: 3pt solid #8e44ad; }
+    .badge {
+      font-size: 7pt;
+      font-weight: bold;
+      padding: 1pt 3pt;
+    }
+    .badge-pass { color: #1b7f3e; background: #e8f5ee; }
+    .badge-fail { color: #c0392b; background: #fdecea; }
+    .badge-review { color: #d35400; background: #fef3e8; }
+    .badge-skip { color: #6c757d; background: #f0f0f0; }
+    .badge-error { color: #8e44ad; background: #f5eaf5; }
+    .control {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 0;
+      border: 1pt solid #ccd6df;
+    }
+    .control-header {
+      background: #edf3f8;
+      padding: 7pt 8pt;
+      border-bottom: 1pt solid #ccd6df;
+    }
+    .control-id {
+      color: #1a5276;
+      font-family: Courier, monospace;
+      font-size: 8pt;
+    }
+    .control-title {
+      font-size: 10pt;
+      font-weight: bold;
+      margin-top: 3pt;
+    }
+    .control-meta {
+      color: #61758a;
+      font-size: 7.5pt;
+      margin-top: 3pt;
+    }
+    .control-body {
+      padding: 7pt 8pt;
+      border-left: 1pt solid #ccd6df;
+      border-right: 1pt solid #ccd6df;
+      border-bottom: 1pt solid #ccd6df;
+      margin-bottom: 13pt;
+    }
+    .field {
+      margin-bottom: 7pt;
+    }
+    .field-label {
+      color: #52677a;
+      font-size: 7pt;
+      font-weight: bold;
+      text-transform: uppercase;
+      margin-bottom: 2pt;
+    }
+    .field-value {
+      font-size: 8.5pt;
+    }
+    .remediation {
+      background: #fff9e8;
+      border: 1pt solid #e4c66a;
+      padding: 6pt;
+    }
+    table.findings {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: Courier, monospace;
+      font-size: 7pt;
+      margin-top: 4pt;
+    }
+    .findings th {
+      color: #ffffff;
+      background: #2d4356;
+      padding: 4pt 3pt;
+      text-align: left;
+      border: 1pt solid #566b7d;
+    }
+    .findings td {
+      padding: 3pt;
+      vertical-align: top;
+      border: 1pt solid #d4dde5;
+    }
+    table.finding-record {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 7.5pt;
+      margin: 4pt 0 7pt 0;
+    }
+    .finding-record th {
+      width: 24%;
+      color: #52677a;
+      background: #f2f5f7;
+      padding: 3pt 4pt;
+      text-align: left;
+      border: 1pt solid #d4dde5;
+    }
+    .finding-record td {
+      padding: 3pt 4pt;
+      border: 1pt solid #d4dde5;
+    }
+    .finding-heading {
+      color: #ffffff !important;
+      background: #2d4356 !important;
+    }
+    .truncated {
+      color: #6b7785;
+      font-style: italic;
+      padding: 5pt;
+    }
+    .anon {
+      background: #fff3cd;
+      border: 1pt solid #e0b84f;
+      padding: 7pt;
+      margin-bottom: 12pt;
+    }
+  </style>
+</head>
+<body>
+  <div class="cover page-break">
+    <div class="brand">MFAudit</div>
+    <h1>RACF Security Audit Report</h1>
+    <div class="subtitle">Automated RACF configuration and access review</div>
+    <table class="cover-meta">
+      <tr><th>System / Sysplex</th><td>{{ system_name }}</td></tr>
+      <tr><th>Report Date</th><td>{{ report_date }}</td></tr>
+      <tr><th>Generated At</th><td>{{ generated_at }}</td></tr>
+      <tr><th>Controls File</th><td>{{ controls_file }}</td></tr>
+    </table>
+    <table class="score">
+      <tr><td><div class="score-number">{{ score_pct }}%</div><div class="score-label">Compliance score</div></td></tr>
+    </table>
+    <div class="disclaimer">
+      This report is produced by automated analysis of RACF runtime data.
+      REVIEW items require human judgement. Validate findings with a qualified
+      RACF security administrator before remediation.
+    </div>
+  </div>
+
+  <div class="section page-break">
+    {% if anonymized %}<div class="anon"><b>Anonymized report.</b> Identifiers in findings have been replaced with stable labels.</div>{% endif %}
+    <h2>Executive Summary</h2>
+    <table class="summary">
+      <tr>
+        <td class="sum-pass"><div class="summary-number">{{ passed }}</div><div class="summary-label">PASS</div></td>
+        <td class="sum-fail"><div class="summary-number">{{ failed }}</div><div class="summary-label">FAIL</div></td>
+        <td class="sum-review"><div class="summary-number">{{ review }}</div><div class="summary-label">REVIEW</div></td>
+        <td class="sum-skip"><div class="summary-number">{{ skipped }}</div><div class="summary-label">SKIP</div></td>
+        <td class="sum-error"><div class="summary-number">{{ errors }}</div><div class="summary-label">ERROR</div></td>
+      </tr>
+    </table>
+    <h3>Controls Overview</h3>
+    <table class="overview">
+      <colgroup>
+        <col width="15%"><col width="39%"><col width="10%">
+        <col width="9%"><col width="17%"><col width="10%">
+      </colgroup>
+      <thead><tr><th>Control ID</th><th>Title</th><th>Category</th><th>Severity</th><th>Sources</th><th>Status</th></tr></thead>
+      <tbody>
+      {% for r in results %}
+        <tr>
+          <td class="row-{{ r.status | lower }}">{{ r.control_id }}</td>
+          <td>{{ r.title }}</td>
+          <td class="center">{{ r.cis_section or r.custom_category or '-' }}</td>
+          <td class="center">{{ r.severity }}</td>
+          <td>{{ r.data_sources_needed | join(', ') }}</td>
+          <td class="center"><span class="badge badge-{{ r.status | lower }}">{{ r.status }}</span></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>Detailed Findings</h2>
+    {% for r in results %}
+    <table class="control">
+      <tr><td class="control-header">
+        <div><span class="control-id">{{ r.control_id }}</span> <span class="badge badge-{{ r.status | lower }}">{{ r.status }}</span> {% if r.severity %}<b>{{ r.severity }}</b>{% endif %}</div>
+        <div class="control-title">{{ r.title }}</div>
+        <div class="control-meta">{% if r.cis_section %}CIS {{ r.cis_section }} | {% endif %}{% if r.stig_rule_id and r.stig_rule_id != 'N/A' %}STIG {{ r.stig_rule_id }} | {% endif %}Source(s): {{ r.data_sources_needed | join(', ') }}</div>
+      </td></tr>
+    </table>
+    <div class="control-body">
+        {% if r.requirement %}<div class="field"><div class="field-label">Requirement</div><div class="field-value">{{ r.requirement | trim }}</div></div>{% endif %}
+        <div class="field"><div class="field-label">Result detail</div><div class="field-value">{{ r.detail if r.detail else '-' }}</div></div>
+        {% if r.findings %}
+          {% set columns = r.findings[0].keys() | list %}
+          <div class="field-label">Findings ({{ r.findings | length }} row(s))</div>
+          {% if columns | length <= 5 %}
+          <table class="findings">
+            <thead><tr>{% for col in columns %}<th>{{ col }}</th>{% endfor %}</tr></thead>
+            <tbody>
+            {% for row in r.findings[:50] %}<tr>{% for col in columns %}<td>{{ row.get(col, '') }}</td>{% endfor %}</tr>{% endfor %}
+            {% if r.findings | length > 50 %}<tr><td colspan="{{ columns | length }}" class="truncated">{{ r.findings | length - 50 }} additional row(s) are available in the CSV export.</td></tr>{% endif %}
+            </tbody>
+          </table>
+          {% else %}
+            {% for row in r.findings[:20] %}
+            <div class="field-label">Finding {{ loop.index }}</div>
+            <table class="finding-record">
+              {% for key, value in row.items() %}<tr><th>{{ key }}</th><td>{{ value }}</td></tr>{% endfor %}
+            </table>
+            {% endfor %}
+            {% if r.findings | length > 20 %}<div class="truncated">{{ r.findings | length - 20 }} additional row(s) are available in the CSV export.</div>{% endif %}
+          {% endif %}
+        {% endif %}
+        {% if r.remediation and r.status != STATUS_PASS and r.status != STATUS_SKIP %}
+        <div class="field remediation"><div class="field-label">Remediation</div><div class="field-value">{{ r.remediation | trim }}</div></div>
+        {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</body>
+</html>

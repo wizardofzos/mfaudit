@@ -61,6 +61,7 @@ import csv
 import json
 import os
 import platform
+import re
 import sys
 import time
 import traceback
@@ -686,11 +687,54 @@ def render_report(results, system_name, report_date, out_dir, controls_path,
                 # Embed CSS inline so xhtml2pdf can find it (it doesn't follow relative links)
                 css_inline = ""
                 if css_path.exists():
-                    css_inline = f"<style>{css_path.read_text(encoding='utf-8')}</style>"
+                    css_for_xhtml = css_path.read_text(encoding="utf-8")
+                    # xhtml2pdf 0.2.17 cannot parse CSS page-margin at-rules
+                    # such as @bottom-center nested inside @page. Its parser
+                    # returns NotImplemented and then raises TypeError while
+                    # trying to iterate that value. The footer is decorative,
+                    # so omit unsupported margin-box rules in the fallback.
+                    css_for_xhtml = re.sub(
+                        r"@(?:top|bottom)-(?:left|center|right)\s*\{[^{}]*\}",
+                        "",
+                        css_for_xhtml,
+                        flags=re.IGNORECASE | re.DOTALL,
+                    )
+                    # xhtml2pdf also lacks support for CSS custom properties.
+                    # Resolve var(--name) references from the :root block.
+                    css_variables = dict(
+                        re.findall(
+                            r"--([\w-]+)\s*:\s*([^;{}]+);",
+                            css_for_xhtml,
+                        )
+                    )
+                    css_for_xhtml = re.sub(
+                        r"var\(\s*--([\w-]+)\s*\)",
+                        lambda match: css_variables.get(match.group(1), match.group(0)),
+                        css_for_xhtml,
+                    )
+                    css_for_xhtml = re.sub(
+                        r":root\s*\{[^{}]*\}", "", css_for_xhtml, flags=re.DOTALL
+                    )
+                    # xhtml2pdf emits getSize warnings for relative
+                    # letter-spacing lengths. They are decorative, so omit them.
+                    css_for_xhtml = re.sub(
+                        r"letter-spacing\s*:\s*[-+]?(?:\d*\.)?\d+em\s*;",
+                        "",
+                        css_for_xhtml,
+                        flags=re.IGNORECASE,
+                    )
+                    css_inline = f"<style>{css_for_xhtml}</style>"
                 html_for_xhtml = html.replace(
                     '<link rel="stylesheet" href="../assets/report.css">',
                     css_inline,
                 )
+                # The default report uses modern grid/inline-block styling
+                # which xhtml2pdf renders poorly. Use a CSS-2/table-based
+                # template for this fallback engine only. Custom templates
+                # retain the compatibility sanitization above.
+                if not template_path:
+                    fallback = env.get_template("xhtml2pdf-report.html.j2")
+                    html_for_xhtml = fallback.render(**context)
                 with open(pdf_path, "wb") as pdf_fh:
                     result = pisa.CreatePDF(html_for_xhtml, dest=pdf_fh)
                 if result.err:
