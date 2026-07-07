@@ -107,6 +107,12 @@ def parse_args():
                    help="IRRDBU00 unload file [default: ./IRRDBU00]")
     p.add_argument("--dcollect",     required=False, metavar="FILE", default=None,
                    help="DCOLLECT unload file (optional)")
+    p.add_argument("--apf-list",     required=False, metavar="FILE", default=None,
+                   help="active APF-authorized libraries, one data set per line (optional)")
+    p.add_argument("--parmlib-list", required=False, metavar="FILE", default=None,
+                   help="active PARMLIB concatenation, one data set per line (optional)")
+    p.add_argument("--proclib-list", required=False, metavar="FILE", default=None,
+                   help="active STC/TSO PROCLIB libraries, one data set per line (optional)")
     p.add_argument("--controls",     required=False, metavar="FILE", nargs="+",
                    help="Controls definition file(s); repeat or space-separate to merge multiple YAML files. "
                         "Defaults to the bundled controls when omitted. "
@@ -370,6 +376,31 @@ def load_dcollect(path):
     return d
 
 
+def load_library_list(path, label):
+    """Load a one-data-set-per-line runtime library inventory, or None."""
+    if not path:
+        return None
+    libraries = sorted({
+        line.strip().upper()
+        for line in Path(path).read_text(encoding="utf-8-sig").splitlines()
+        if line.strip() and not line.lstrip().startswith(("#", "*"))
+    })
+    print(f"[+] Loaded {len(libraries)} {label} libraries from {path}")
+    return libraries
+
+
+def load_apf_list(path):
+    return load_library_list(path, "APF-authorized")
+
+
+def load_parmlib_list(path):
+    return load_library_list(path, "PARMLIB")
+
+
+def load_proclib_list(path):
+    return load_library_list(path, "PROCLIB")
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Control execution engine
 # ──────────────────────────────────────────────────────────────────────────────
@@ -466,7 +497,10 @@ def run_pandas_query(control, impl, setropts, irrdbu00, dcollect):
     return STATUS_SKIP, "Unhandled assertion type", []
 
 
-def run_python_control(control, impl, setropts, irrdbu00, dcollect):
+def run_python_control(
+    control, impl, setropts, irrdbu00, dcollect,
+    apf_list, parmlib_list, proclib_list,
+):
     """Execute inline Python logic defined in controls.yaml."""
     dataset_spec = impl.get("dataset", "")
     logic = impl.get("logic", "")
@@ -477,6 +511,9 @@ def run_python_control(control, impl, setropts, irrdbu00, dcollect):
         "setropts": setropts,
         "irrdbu00": irrdbu00,
         "dcollect": dcollect,
+        "apf_list": apf_list,
+        "parmlib_list": parmlib_list,
+        "proclib_list": proclib_list,
         "status": STATUS_SKIP,
         "detail": "",
         "findings": [],
@@ -514,6 +551,12 @@ def run_python_control(control, impl, setropts, irrdbu00, dcollect):
             return STATUS_SKIP, "SETROPTS data not provided", []
         if "irrdbu00" in required and irrdbu00 is None:
             return STATUS_SKIP, "IRRDBU00 data not provided", []
+        if "apf_list" in required and apf_list is None:
+            return STATUS_SKIP, "APF list not provided", []
+        if "parmlib_list" in required and parmlib_list is None:
+            return STATUS_SKIP, "PARMLIB list not provided", []
+        if "proclib_list" in required and proclib_list is None:
+            return STATUS_SKIP, "PROCLIB list not provided", []
 
     try:
         exec(logic, ns)
@@ -523,7 +566,10 @@ def run_python_control(control, impl, setropts, irrdbu00, dcollect):
     return ns.get("status", STATUS_SKIP), ns.get("detail", ""), ns.get("findings", [])
 
 
-def run_control(control, setropts, irrdbu00, dcollect):
+def run_control(
+    control, setropts, irrdbu00, dcollect,
+    apf_list=None, parmlib_list=None, proclib_list=None,
+):
     """Dispatch and execute a single control. Returns (status, detail, findings)."""
     impl = control.get("implementation", {})
     engine = impl.get("engine", "pandas_query")
@@ -536,11 +582,20 @@ def run_control(control, setropts, irrdbu00, dcollect):
         return STATUS_SKIP, "IRRDBU00 not provided (use --irrdbu00)", []
     if "dcollect" in needed and dcollect is None:
         return STATUS_SKIP, "DCOLLECT not provided (use --dcollect)", []
+    if "apf_list" in needed and apf_list is None:
+        return STATUS_SKIP, "APF list not provided (use --apf-list)", []
+    if "parmlib_list" in needed and parmlib_list is None:
+        return STATUS_SKIP, "PARMLIB list not provided (use --parmlib-list)", []
+    if "proclib_list" in needed and proclib_list is None:
+        return STATUS_SKIP, "PROCLIB list not provided (use --proclib-list)", []
 
     if engine == "pandas_query":
         return run_pandas_query(control, impl, setropts, irrdbu00, dcollect)
     elif engine == "python":
-        return run_python_control(control, impl, setropts, irrdbu00, dcollect)
+        return run_python_control(
+            control, impl, setropts, irrdbu00, dcollect,
+            apf_list, parmlib_list, proclib_list,
+        )
     else:
         return STATUS_SKIP, f"Unknown engine: {engine}", []
 
@@ -681,6 +736,31 @@ def render_report(results, system_name, report_date, out_dir, controls_path,
 
         print(f"[+] CSV results written to {csv_path}")
 
+        # Preserve complete finding rows in a separate machine-readable CSV.
+        finding_columns = sorted({
+            key
+            for result in results
+            for finding in result.get("findings", [])
+            for key in finding
+            if key not in {"control_id", "status"}
+        })
+        findings_path = Path(out_dir) / "control_findings.csv"
+        finding_fields = ["control_id", "status"] + finding_columns
+        with open(findings_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(
+                fh, fieldnames=finding_fields, extrasaction="ignore"
+            )
+            writer.writeheader()
+            for result in results:
+                for finding in result.get("findings", []):
+                    row = {
+                        "control_id": result.get("control_id", ""),
+                        "status": result.get("status", ""),
+                    }
+                    row.update(finding)
+                    writer.writerow(row)
+        print(f"[+] Detailed findings written to {findings_path}")
+
     # JSON
     if "JSON" in formats:
         json_path = Path(out_dir) / "controls_results.json"
@@ -697,6 +777,7 @@ def render_report(results, system_name, report_date, out_dir, controls_path,
                 "detail": r.get("detail", ""),
                 "data_sources": r.get("data_sources_needed", []),
                 "stig_rule_id": r.get("stig_rule_id", ""),
+                "findings": r.get("findings", []),
             })
 
         with open(json_path, "w", encoding="utf-8") as fh:
@@ -832,6 +913,18 @@ def main():
         print(f"[!] DCOLLECT file not found: {args.dcollect}", file=sys.stderr)
         sys.exit(1)
 
+    if args.apf_list and not Path(args.apf_list).exists():
+        print(f"[!] APF list file not found: {args.apf_list}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.parmlib_list and not Path(args.parmlib_list).exists():
+        print(f"[!] PARMLIB list file not found: {args.parmlib_list}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.proclib_list and not Path(args.proclib_list).exists():
+        print(f"[!] PROCLIB list file not found: {args.proclib_list}", file=sys.stderr)
+        sys.exit(1)
+
     if args.template:
         args.template = str(_resolve_template(args.template))
 
@@ -848,6 +941,9 @@ def main():
     setropts = load_setropts(args.setropts)
     irrdbu00 = load_irrdbu00(args.irrdbu00)
     dcollect = load_dcollect(args.dcollect)
+    apf_list = load_apf_list(args.apf_list)
+    parmlib_list = load_parmlib_list(args.parmlib_list)
+    proclib_list = load_proclib_list(args.proclib_list)
 
     # Load and merge controls from all files
     controls = []
@@ -867,7 +963,10 @@ def main():
         print(f"  [{cid}] {title[:70]}", end=" ... ", flush=True)
 
         try:
-            status, detail, findings = run_control(ctrl, setropts, irrdbu00, dcollect)
+            status, detail, findings = run_control(
+                ctrl, setropts, irrdbu00, dcollect,
+                apf_list, parmlib_list, proclib_list,
+            )
         except Exception as exc:
             status  = STATUS_ERROR
             detail  = str(exc)
