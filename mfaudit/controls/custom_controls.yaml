@@ -36,3 +36,160 @@ controls:
       If access is genuinely required, raise a business justification and
       re-assign it to a non-B-prefixed identity.
 
+ - control_id: CUSTOM-DS-001
+    title: "Review existing data sets without an effective RACF profile"
+    severity: high
+    requirement: >
+      Every non-temporary data set discovered by DCOLLECT must be covered by
+      an effective discrete or generic RACF DATASET profile. PROTECTALL with
+      FAILURES normally denies access when no profile exists, but uncovered
+      data sets remain an operational risk and can still be accessed through
+      privileged or trusted processing exceptions.
+    custom:
+      benchmark: "Internal Access Control Policy"
+      category: "Data set profile coverage"
+      reference: "AC-DS-001"
+    data_sources_needed: [setropts, irrdbu00, dcollect]
+    implementation:
+      engine: python
+      dataset: dcollect.datasets
+      logic: |
+        from mfaudit.racf_profiles import DatasetProfileIndex
+
+        index = DatasetProfileIndex(irrdbu00.datasets)
+        inventory = df.copy()
+        inventory = inventory[
+            ~inventory['DCDTEMP'].fillna(False).astype(bool) &
+            inventory['DCDDSNAM'].fillna('').astype(str).str.strip().ne('')
+        ]
+
+        findings = []
+        for _, dataset in inventory.iterrows():
+            name = str(dataset['DCDDSNAM']).strip().upper()
+            volume = str(dataset.get('DCDVOLSR', '')).strip().upper()
+            if index.match(name, volume) is None:
+                findings.append({
+                    'DATASET': name,
+                    'VOLUME': volume,
+                    'SMS_MANAGED': bool(dataset.get('DCDSMSM', False)),
+                    'RACF_INDICATED': bool(dataset.get('DCDRACFD', False)),
+                    'EFFECTIVE_PROFILE': 'NONE',
+                })
+
+        findings = sorted(findings, key=lambda item: (item['DATASET'], item['VOLUME']))
+        count = len(findings)
+        protall_rows = setropts.fieldInfo[
+            setropts.fieldInfo['Setting'] == 'PROTALL'
+        ]
+        protall = (
+            str(protall_rows.iloc[0]['Value']).strip().upper()
+            if len(protall_rows) else 'UNKNOWN'
+        )
+        if count == 0:
+            status = 'PASS'
+            detail = (
+                f"All {len(inventory)} non-temporary DCOLLECT data-set record(s) "
+                "have an effective RACF profile"
+            )
+        elif protall == 'FAILURES':
+            status = 'REVIEW'
+            detail = (
+                f"{count} of {len(inventory)} non-temporary DCOLLECT data-set "
+                "record(s) have no effective RACF profile; PROTECTALL(FAILURES) "
+                "normally denies access, but validate privileged/trusted access "
+                "and restore intentional profile coverage"
+            )
+        else:
+            status = 'FAIL'
+            detail = (
+                f"{count} of {len(inventory)} non-temporary DCOLLECT data-set "
+                f"record(s) have no effective RACF profile while PROTALL={protall}"
+            )
+      assertion:
+        type: python_result
+        pass_message: "Every existing non-temporary data set has an effective RACF profile"
+        fail_message: "{count} existing data-set record(s) have no effective RACF profile"
+    remediation: >
+      Validate each uncovered data set and define an appropriately scoped
+      discrete or generic DATASET profile with least-privilege access. Do not
+      rely on PROTECTALL denial as the intended long-term protection model.
+
+  - control_id: CUSTOM-DS-002
+    title: "Identify risky RACF profiles that cover existing data sets"
+    severity: high
+    requirement: >
+      Effective RACF DATASET profiles covering existing data sets must use
+      UACC(NONE) and must not use WARNING mode. Findings are aggregated by the
+      effective profile so broad generic profiles are prioritised by their
+      actual live data-set coverage rather than by profile definitions alone.
+    custom:
+      benchmark: "Internal Access Control Policy"
+      category: "Effective data set permissions"
+      reference: "AC-DS-002"
+    data_sources_needed: [irrdbu00, dcollect]
+    implementation:
+      engine: python
+      dataset: dcollect.datasets
+      logic: |
+        from collections import defaultdict
+        from mfaudit.racf_profiles import DatasetProfileIndex
+
+        index = DatasetProfileIndex(irrdbu00.datasets)
+        coverage = defaultdict(list)
+        inventory = df[
+            ~df['DCDTEMP'].fillna(False).astype(bool) &
+            df['DCDDSNAM'].fillna('').astype(str).str.strip().ne('')
+        ]
+
+        for _, dataset in inventory.iterrows():
+            name = str(dataset['DCDDSNAM']).strip().upper()
+            volume = str(dataset.get('DCDVOLSR', '')).strip().upper()
+            profile = index.match(name, volume)
+            if profile is None:
+                continue
+            uacc = str(profile.get('DSBD_UACC', 'NONE')).strip().upper()
+            warning = str(profile.get('DSBD_WARNING', 'NO')).strip().upper()
+            if uacc != 'NONE' or warning == 'YES':
+                key = (
+                    str(profile.get('DSBD_NAME', '')).strip().upper(),
+                    str(profile.get('DSBD_VOL', '')).strip().upper(),
+                    uacc,
+                    warning,
+                )
+                coverage[key].append(name)
+
+        findings = []
+        for (profile, volume, uacc, warning), datasets in coverage.items():
+            names = sorted(set(datasets))
+            findings.append({
+                'EFFECTIVE_PROFILE': profile,
+                'PROFILE_VOLUME': volume,
+                'UACC': uacc,
+                'WARNING': warning,
+                'DATASET_COUNT': len(names),
+                'DATASETS': '; '.join(names),
+            })
+
+        findings = sorted(
+            findings,
+            key=lambda item: (-item['DATASET_COUNT'], item['EFFECTIVE_PROFILE']),
+        )
+        count = len(findings)
+        affected = sum(item['DATASET_COUNT'] for item in findings)
+        status = 'PASS' if count == 0 else 'FAIL'
+        detail = (
+            "No existing data sets are covered by an effective profile with "
+            "UACC above NONE or WARNING mode"
+            if count == 0 else
+            f"{count} risky effective profile(s) cover {affected} existing "
+            "non-temporary data set(s)"
+        )
+      assertion:
+        type: python_result
+        pass_message: "Effective profiles for existing data sets use UACC(NONE) and NOWARNING"
+        fail_message: "{count} risky effective profile(s) cover existing data sets"
+    remediation: >
+      Replace universal access with explicit user or group permits, disable
+      WARNING mode, and split generic profiles whose real data-set coverage
+      combines resources with different authorization requirements.
+
