@@ -31,17 +31,19 @@ Minimal JCL example:
 
 Copy the output dataset to your workstation as a binary file.
 
-### SETROPTS REXX export
+### SETROPTS data
 
-MFAudit requires a REXX-produced SETROPTS export — not raw `SETROPTS LIST` console output.
+MFAudit accepts SETROPTS data in either of two formats, auto-detected by `--setropts`:
 
-See the mfpandas SETROPTS documentation:
+1. **REXX/IRRXUTIL export** (recommended) — a REXX writes one `KEY:VALUE` line per
+   setting. See the mfpandas SETROPTS documentation:
+   https://mfpandas.readthedocs.io/en/latest/setropts.html
+2. **Raw `SETROPTS LIST` output** — a plain console or JES/SDSF spool capture of the
+   `SETROPTS LIST` command, converted on the fly. Use this when running the REXX is
+   not convenient. A few settings absent from the `SETROPTS LIST` text cannot be
+   reconstructed, so prefer format 1 when you can.
 
-https://mfpandas.readthedocs.io/en/latest/setropts.html
-
-The exec writes one `KEY:VALUE` line per setting.
-
-Copy `SETROPTS` to your workstation as a text file.
+Copy the file to your workstation as a text file.
 
 ---
 

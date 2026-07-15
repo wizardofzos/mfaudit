@@ -103,7 +103,8 @@ def parse_args():
         description="MFAudit – RACF CIS Benchmark Audit Report Generator"
     )
     p.add_argument("--setropts",     required=False, metavar="FILE", default="SETROPTS",
-                   help="REXX-produced SETROPTS export (KEY:VALUE lines) [default: ./SETROPTS]")
+                   help="SETROPTS data: either the REXX-produced KEY:VALUE export or raw "
+                        "'SETROPTS LIST' console/spool output (auto-detected) [default: ./SETROPTS]")
     p.add_argument("--irrdbu00",     required=False, metavar="FILE", default="IRRDBU00",
                    help="IRRDBU00 unload file [default: ./IRRDBU00]")
     p.add_argument("--dcollect",     required=False, metavar="FILE", default=None,
@@ -330,13 +331,27 @@ def anonymize_results(results: list, irrdbu00=None) -> list:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def load_setropts(path):
-    """Load and return a parsed SETROPTS object, or None."""
+    """Load and return a parsed SETROPTS object, or None.
+
+    Accepts either input format transparently:
+      * the REXX/IRRXUTIL ``KEY:VALUE`` export (the historical format), or
+      * raw ``SETROPTS LIST`` console/spool output, which is converted on the
+        fly via ``SETROPTS.from_setropts_list``.
+
+    Detection is by content: the converter raises ``ValueError`` when the file
+    is not a ``SETROPTS LIST`` report, in which case we fall back to the
+    ``KEY:VALUE`` parser. Existing exports therefore behave exactly as before.
+    """
     if not path:
         return None
     from mfpandas import SETROPTS
     print(f"[+] Loading SETROPTS from {path}")
-    s = SETROPTS(setropts=path)
-    return s
+    try:
+        s = SETROPTS.from_setropts_list(path)
+        print("    detected raw SETROPTS LIST output; converted to key/value")
+        return s
+    except ValueError:
+        return SETROPTS(setropts=path)
 
 
 def load_irrdbu00(path):

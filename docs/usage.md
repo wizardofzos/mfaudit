@@ -15,7 +15,7 @@ mfaudit [options]
 | `--controls FILE [FILE …]` | bundled controls | One or more controls YAML files. Controls from all files are merged before execution. Defaults to all YAML files bundled with the package (`mfaudit/controls/`). Run `--list-controls` to see the bundled paths. |
 | `--out DIR` | current directory | Output directory. Created automatically if it does not exist. |
 | `--irrdbu00 PATH` | `./IRRDBU00` | Path to the IRRDBU00 database unload. |
-| `--setropts PATH` | `./SETROPTS` | Path to the REXX-produced SETROPTS export. |
+| `--setropts PATH` | `./SETROPTS` | Path to SETROPTS data — either the REXX-produced `KEY:VALUE` export or raw `SETROPTS LIST` console/spool output (the format is auto-detected). |
 | `--dcollect PATH` | *(not loaded)* | Path to a DCOLLECT output file. Required only by controls that use it. |
 | `--system-name NAME` | `UNKNOWN` | Mainframe system identifier shown in the report header. |
 | `--report-date DATE` | Today's date | ISO-format date (`YYYY-MM-DD`) shown in the report header. |
