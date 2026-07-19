@@ -6,7 +6,9 @@
 
 **Automated RACF security auditing — from raw RACF exports to audit-ready reports in a single command.**
 
-MFAudit reads standard z/OS security exports — IRRDBU00 unloads and SETROPTS REXX exports — and evaluates them against a library of CIS Benchmark and custom RACF security controls.
+MFAudit reads standard z/OS security exports — IRRDBU00 unloads, SETROPTS
+exports, optional DCOLLECT data, and runtime library inventories — and evaluates
+them against a library of CIS Benchmark and custom RACF security controls.
 
 The result:
 
@@ -116,16 +118,23 @@ Supported values:
 
 ```text
 z/OS system
-  ├── IRRDBU00 unload  ──────────────────────────────────┐
-  └── SETROPTS REXX export  ───────────────────────────┐ │
-                                                        ↓ ↓
-  controls.yaml  ──────────────────────────►  mfaudit
-  example_controls.yaml (optional)  ────────►     │
-                                                  │
-                                                  ├── report.pdf
-                                                  ├── controls_results.csv
-                                                  └── controls_results.json
+  ├── IRRDBU00 unload ───────────────────────────────────┐
+  ├── SETROPTS export ─────────────────────────────────┐ │
+  ├── DCOLLECT (optional) ────────────────────────────┐ │ │
+  └── runtime inventory (optional) ─────────────────┐ │ │ │
+                                                    ↓ ↓ ↓ ↓
+  controls YAML ────────────────────────────►   mfaudit
+                                                   │
+                                                   ├── report.pdf
+                                                   ├── controls_results.csv
+                                                   └── controls_results.json
 ```
+
+The runtime inventory can supply active APF, PARMLIB, PROCLIB, LPA, master
+catalog, and RACF database data sets plus approved system-programmer IDs. See
+the [quick start](quickstart.md#optional-runtime-inventory) for its YAML format
+and the [usage reference](usage.md#runtime-list-and-inventory-format) for all
+individual input flags.
 
 ---
 

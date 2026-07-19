@@ -4,7 +4,9 @@
 
 **Automated RACF security auditing — from raw RACF exports to audit-ready reports in a single command.**
 
-MFAudit reads standard z/OS security exports — IRRDBU00 unloads and SETROPTS REXX exports — and evaluates them against CIS Benchmark, STIG, and custom RACF security controls.
+MFAudit reads standard z/OS security exports — IRRDBU00 unloads, SETROPTS
+exports, optional DCOLLECT data, and runtime system inventories — and evaluates
+them against CIS Benchmark, STIG, and custom RACF security controls.
 
 The result:
 
@@ -196,11 +198,61 @@ for the complete schema and engine reference.
 
 ## Data sources
 
-| Source | mfpandas class | Collection method |
-|---|---|---|
-| `--setropts` | `SETROPTS` | IRRXUTIL/REXX export (`KEY:VALUE`) |
-| `--irrdbu00` | `IRRDBU00` | IRRDBU00 RACF unload |
-| `--dcollect` | `DCOLLECT` | IDCAMS DCOLLECT output (optional) |
+| Source | Contents |
+|---|---|
+| `--setropts FILE` | IRRXUTIL/REXX `KEY:VALUE` export or raw `SETROPTS LIST` output |
+| `--irrdbu00 FILE` | IRRDBU00 RACF database unload |
+| `--dcollect FILE` | IDCAMS DCOLLECT output (optional) |
+| `--apf-list FILE` | Active APF-authorized data sets |
+| `--parmlib-list FILE` | Active PARMLIB concatenation |
+| `--proclib-list FILE` | Active STC/TSO PROCLIB data sets |
+| `--lpa-list FILE` | Active LPA concatenation |
+| `--master-catalog FILE` | Active master catalog data set name(s) |
+| `--racf-db-list FILE` | Primary and backup RACF database data sets |
+| `--sysprog-list FILE` | Approved system-programmer user or group IDs |
+| `--inventory FILE` | YAML file containing any or all of the seven runtime lists above |
+
+Each individual runtime-list file contains one data set name or ID per line.
+Blank lines and lines beginning with `#` or `*` are ignored. Entries are
+normalized to uppercase and deduplicated.
+
+The same information can be supplied in one inventory file:
+
+```yaml
+apf:
+  - SYS1.LINKLIB
+  - SYS1.SVCLIB
+parmlib:
+  - SYS1.PARMLIB
+proclib:
+  - SYS1.PROCLIB
+lpa:
+  - SYS1.LPALIB
+master_catalog:
+  - SYS1.MASTER.CATALOG
+racf_db:
+  - SYS1.RACF.PRIMARY
+  - SYS1.RACF.BACKUP
+sysprog:
+  - SYSPROG
+  - RACFADM
+```
+
+```bash
+mfaudit --irrdbu00 IRRDBU00 \
+        --setropts SETROPTS \
+        --inventory inventory.yaml
+```
+
+An individual flag overrides the corresponding inventory section. For
+example, `--apf-list current-apf.txt --inventory inventory.yaml` uses
+`current-apf.txt` for APF and the YAML file for the other lists.
+
+These inputs describe the active runtime configuration; MFAudit combines them
+with RACF profiles and access lists from IRRDBU00. A control that declares an
+optional source but does not receive it is marked `SKIP`. The `sysprog` list
+also lets writer-review controls treat WRITE access held only by approved IDs
+as resolved instead of requiring review.
 
 See:
 

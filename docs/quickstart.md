@@ -6,7 +6,7 @@ This page walks you through your first MFAudit run — from collecting data on t
 
 ## Step 1 — Collect data on z/OS
 
-You need two files from the mainframe:
+The basic audit uses two files from the mainframe:
 
 | File | What it contains |
 |---|---|
@@ -44,6 +44,64 @@ MFAudit accepts SETROPTS data in either of two formats, auto-detected by `--setr
    reconstructed, so prefer format 1 when you can.
 
 Copy the file to your workstation as a text file.
+
+### Optional runtime inventory
+
+Some controls need to know which libraries and databases are active at
+runtime. IRRDBU00 describes RACF profiles and access lists, but does not by
+itself identify the active APF, PARMLIB, PROCLIB, LPA, master catalog, or RACF
+database data sets.
+
+You can collect these sources into separate text files:
+
+| CLI option | File contents |
+|---|---|
+| `--apf-list FILE` | Active APF-authorized libraries |
+| `--parmlib-list FILE` | Active PARMLIB concatenation |
+| `--proclib-list FILE` | Active STC and TSO PROCLIB libraries |
+| `--lpa-list FILE` | Active LPA concatenation |
+| `--master-catalog FILE` | Active master catalog data set name(s) |
+| `--racf-db-list FILE` | Primary and backup RACF database data sets |
+| `--sysprog-list FILE` | Approved system-programmer user or group IDs |
+
+Use one data set name or ID per line. Blank lines and lines whose first
+non-space character is `#` or `*` are ignored:
+
+```text
+# Active APF libraries
+SYS1.LINKLIB
+SYS1.SVCLIB
+VENDOR.PRODUCT.LOAD
+```
+
+MFAudit uppercases, deduplicates, and sorts entries after loading them.
+
+Alternatively, place any or all lists in one YAML inventory:
+
+```yaml
+apf:
+  - SYS1.LINKLIB
+  - SYS1.SVCLIB
+parmlib:
+  - SYS1.PARMLIB
+proclib:
+  - SYS1.PROCLIB
+lpa:
+  - SYS1.LPALIB
+master_catalog:
+  - SYS1.MASTER.CATALOG
+racf_db:
+  - SYS1.RACF.PRIMARY
+  - SYS1.RACF.BACKUP
+sysprog:
+  - SYSPROG
+  - RACFADM
+```
+
+The YAML root must be a mapping, and every section must be a YAML list.
+Unknown section names are ignored with a warning. An explicit list option
+overrides its matching inventory section, so the inventory can provide a
+baseline while a current list replaces one section.
 
 ---
 
@@ -112,6 +170,35 @@ mfaudit --irrdbu00 /data/IRRDBU00 \
          --format CSV,JSON,PDF \
          --out out/
 ```
+
+### Run with runtime inventory
+
+```bash
+mfaudit --irrdbu00 /data/IRRDBU00 \
+         --setropts /data/SETROPTS \
+         --dcollect /data/DCOLLECT \
+         --inventory /data/inventory.yaml \
+         --system-name SYSA \
+         --format CSV,JSON,PDF \
+         --out out/
+```
+
+Or supply separate list files:
+
+```bash
+mfaudit --apf-list /data/apf.txt \
+         --parmlib-list /data/parmlib.txt \
+         --proclib-list /data/proclib.txt \
+         --lpa-list /data/lpa.txt \
+         --master-catalog /data/master-catalog.txt \
+         --racf-db-list /data/racf-db.txt \
+         --sysprog-list /data/sysprogs.txt
+```
+
+Controls that require an omitted runtime list are marked `SKIP`. The approved
+system-programmer list has an additional purpose: writer-review controls treat
+WRITE access held only by listed IDs as resolved (`PASS`) rather than
+`REVIEW`.
 
 ### Anonymized output
 
