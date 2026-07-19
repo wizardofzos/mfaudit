@@ -19,7 +19,7 @@ Controls are YAML documents. Every control maps to one or more mfpandas DataFram
     | `irrdbu00.generalAccess` | IRRDBU00 | `GRAC_CLASS_NAME`, `GRAC_NAME`, `GRAC_AUTH_ID`, `GRAC_ACCESS` |
     | `irrdbu00.userOMVS` | IRRDBU00 | `USOMVS_NAME`, `USOMVS_UID` |
     | `irrdbu00.datasets` | IRRDBU00 | `DSBD_NAME`, `DSBD_UACC` |
-    | `dcollect.datasets` | DCOLLECT | `NAME`, `TYPE`, `VOLUMES` |
+    | `dcollect.datasets` | DCOLLECT | `DCDDSNAM`, `DCDVOLSR`, `DCDRACFD`, `DCDSMSM`, `DCDTEMP`, `DCDTYPE`, `DCDKLBL` |
 
 2. Decide which engine fits:
     - **`pandas_query`** — single filter expression, empty result = PASS

@@ -1,4 +1,4 @@
-mfpandas
+mfpandas>=0.1.8
 pandas
 pyyaml
 jinja2

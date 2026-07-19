@@ -1,0 +1,3331 @@
+metadata:
+  source: STIG-ibm_zos_racf.json
+  benchmark: IBM z/OS RACF Security Technical Implementation Guide
+  version: V9R8
+  severity: high
+  control_count: 27
+controls:
+- control_id: STIG-V-223649
+  title: IBM RACF must limit Write or greater access to SYS1.NUCLEUS to system programmers only.
+  severity: high
+  requirement: |-
+    Discussion:
+    This data set contains a large portion of the system initialization (IPL) programs and pointers to the master and alternate master catalog. Unauthorized access could result in the compromise of the operating system environment, ACP, and customer data.
+
+    Satisfies: SRG-OS-000080-GPOS-00048, SRG-OS-000259-GPOS-00100, SRG-OS-000324-GPOS-00125
+
+    Check procedure:
+    Execute a dataset access list for SYS1.NUCLEUS.
+
+    If all of the Following are untrue, this is not a finding.
+
+    If any of the following is true, this is a finding.
+
+    -The ACP data set rules for SYS1.NUCLEUS do not restrict WRITE or greater access to only z/OS systems programming personnel.
+    -The ACP data set rules for SYS1.NUCLEUS do not specify that all (i.e., failures and successes) WRITE or greater access will be logged.
+  stig:
+    rule_id: SV-223649r1137691_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-ES-000010
+    reference: V-223649 | SV-223649r1137691_rule | CCI-000213
+  data_sources_needed:
+  - irrdbu00
+  implementation:
+    engine: python
+    dataset: irrdbu00.datasets
+    logic: |
+      import re
+
+      target = 'SYS1.NUCLEUS'
+      ranks = {'NONE': 0, 'EXECUTE': 1, 'READ': 2, 'UPDATE': 3, 'CONTROL': 4, 'ALTER': 5}
+      user_ids = set(irrdbu00.users['USBD_NAME'].astype(str).str.upper())
+      group_ids = set(irrdbu00.groups['GPBD_NAME'].astype(str).str.upper())
+
+      def auth_type(value):
+          auth_id = str(value).upper()
+          if auth_id in user_ids:
+              return 'USER'
+          if auth_id in group_ids:
+              return 'GROUP'
+          return 'UNRESOLVED'
+
+      all_profiles = irrdbu00.datasets
+      profiles = all_profiles[all_profiles['DSBD_NAME'] == target].copy()
+      if profiles.empty:
+          def matches(pattern, value):
+              expression = re.escape(str(pattern))
+              expression = expression.replace(r'\*\*', '.*')
+              expression = expression.replace(r'\*', '[^.]*').replace('%', '[^.]')
+              return re.fullmatch(expression, value) is not None
+
+          candidates = all_profiles[
+              all_profiles['DSBD_NAME'].map(lambda pattern: matches(pattern, target))
+          ].copy()
+          if not candidates.empty:
+              candidates['_specificity'] = candidates['DSBD_NAME'].str.replace(
+                  '*', '', regex=False
+              ).str.replace('%', '', regex=False).str.len()
+              best = candidates['_specificity'].max()
+              profiles = candidates[candidates['_specificity'] == best].copy()
+      access = irrdbu00.datasetAccess
+      sysprog = {str(x).upper() for x in sysprog_list} if sysprog_list else None
+
+      def _approved(auth_id):
+          if sysprog is None:
+              return 'UNREVIEWED'
+          return 'YES' if str(auth_id).upper() in sysprog else 'NO'
+
+      findings = []
+      hard_issues = []
+      review_rows = 0
+      unapproved_rows = 0
+
+      if profiles.empty:
+          hard_issues.append('No covering RACF data-set profile was found')
+          findings.append({
+              'DSBD_NAME': target, 'DSBD_UACC': 'MISSING',
+              'DSBD_AUDIT_LEVEL': 'MISSING', 'DSBD_AUDIT_OKQUAL': 'MISSING',
+              'DSACC_AUTH_ID': '', 'AUTH_TYPE': '', 'DSACC_ACCESS': '', 'APPROVED': ''
+          })
+      else:
+          for _, profile in profiles.iterrows():
+              uacc = str(profile['DSBD_UACC']).upper()
+              audit_level = str(profile['DSBD_AUDIT_LEVEL']).upper()
+              audit_qual = str(profile['DSBD_AUDIT_OKQUAL']).upper()
+              uacc_ok = ranks.get(uacc, 99) <= ranks['READ']
+              audit_ok = (
+                  audit_level == 'ALL' and
+                  ranks.get(audit_qual, 99) <= ranks['UPDATE']
+              )
+              if not uacc_ok:
+                  hard_issues.append(f'UACC={uacc} exceeds READ')
+              if not audit_ok:
+                  hard_issues.append(
+                      f'AUDIT={audit_level}({audit_qual or "NONE"}) does not log '
+                      f'all successful and failed UPDATE-or-greater access'
+                  )
+
+              related = access[
+                  (access['DSACC_NAME'] == profile['DSBD_NAME']) &
+                  (
+                      access['DSACC_ACCESS'].map(
+                          lambda value: ranks.get(str(value).upper(), -1)
+                      ) >= ranks['UPDATE']
+                  )
+              ]
+              review_rows += len(related)
+              if related.empty:
+                  findings.append({
+                      'DSBD_NAME': profile['DSBD_NAME'],
+                      'DSBD_UACC': uacc,
+                      'DSBD_AUDIT_LEVEL': audit_level,
+                      'DSBD_AUDIT_OKQUAL': audit_qual,
+                      'DSACC_AUTH_ID': '',
+                      'AUTH_TYPE': '',
+                      'DSACC_ACCESS': '',
+                      'APPROVED': ''
+                  })
+              else:
+                  for _, permit in related.iterrows():
+                      appr = _approved(permit['DSACC_AUTH_ID'])
+                      if appr != 'YES':
+                          unapproved_rows += 1
+                      findings.append({
+                          'DSBD_NAME': profile['DSBD_NAME'],
+                          'DSBD_UACC': uacc,
+                          'DSBD_AUDIT_LEVEL': audit_level,
+                          'DSBD_AUDIT_OKQUAL': audit_qual,
+                          'DSACC_AUTH_ID': permit['DSACC_AUTH_ID'],
+                          'AUTH_TYPE': auth_type(permit['DSACC_AUTH_ID']),
+                          'DSACC_ACCESS': permit['DSACC_ACCESS'],
+                          'APPROVED': appr
+                      })
+
+      hard_issues = sorted(set(hard_issues))
+      if hard_issues:
+          status = 'FAIL'
+          detail = target + ': ' + '; '.join(hard_issues)
+      elif unapproved_rows:
+          status = 'REVIEW'
+          detail = (
+              f'RACF profile settings for {target} meet the technical thresholds; '
+              f'validate {unapproved_rows} permit(s) not in the system-programmer list'
+          )
+      elif review_rows:
+          status = 'PASS'
+          detail = (
+              f'Write access to {target} is limited to {review_rows} approved '
+              'system-programmer permit(s)'
+          )
+      else:
+          status = 'PASS'
+          detail = f'RACF profile settings for {target} meet the technical thresholds'
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    Review access authorization to critical system files. Evaluate the impact of correcting the deficiency. Develop a plan of action and implement the changes required to protect SYS1.NUCLEUS.
+
+    Configure the WRITE or greater access to SYS1.NUCLEUS to be limited to system programmers only and all WRITE or greater access is logged.
+  source_metadata:
+    vulnerability_id: V-223649
+    rule_id: SV-223649r1137691_rule
+    rule_version: RACF-ES-000010
+    check_id: C-25322r514636_chk
+    fix_id: F-25310r514637_fix
+    cci: CCI-000213
+    documentable: 'false'
+    coverage: HYBRID
+    evidence_note: Profile existence, UACC, and auditing are automated. Explicit access IDs require comparison
+      with approved personnel roles.
+- control_id: STIG-V-223666
+  title: IBM RACF access to the System Master Catalog must be properly protected.
+  severity: high
+  requirement: |-
+    Discussion:
+    To mitigate the risk of unauthorized access to sensitive information by entities that have been issued certificates by DoD-approved PKIs, all DoD systems (e.g., web servers and web portals) must be properly configured to incorporate access control methods that do not rely solely on the possession of a certificate for access. Successful authentication must not automatically give an entity access to an asset or security boundary. Authorization procedures and controls must be implemented to ensure each authenticated entity also has a validated and current authorization. Authorization is the process of determining whether an entity, once authenticated, is permitted to access a specific asset. Information systems use access control policies and enforcement mechanisms to implement this requirement.
+
+    Satisfies: SRG-OS-000080-GPOS-00048, SRG-OS-000324-GPOS-00125
+
+    Check procedure:
+    Refer to SYSCATxx member of SYS1.NUCLEUS.
+
+    Multiple SYSCATxx members may be defined. If so, refer to Master Catalog message for IPL.
+
+    If the member is not found, refer to the appropriate LOADxx member of SYS1.PARMLIB.
+
+    If data set rules for the Master Catalog do not restrict greater than "READ" access to only z/OS systems programming personnel, this is a finding.
+
+    If Products or procedures requiring system programmer access for system-level maintenance meet the following specific case, this is not a finding:
+    - The batch job or procedure must be documented in the SITE Security Plan.
+    - Reside in a data set that is restricted to systems programmers' access only.
+
+    If dataset rules for the Master Catalog do not specify that all (i.e., failures and successes) greater than "READ" access will be logged, this is a finding.
+  stig:
+    rule_id: SV-223666r1137691_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-ES-000180
+    reference: V-223666 | SV-223666r1137691_rule | CCI-000213
+  data_sources_needed:
+  - irrdbu00
+  - mastercat_list
+  implementation:
+    engine: python
+    dataset: irrdbu00.datasets
+    logic: |
+      import re
+
+      libraries = mastercat_list
+      ranks = {'NONE': 0, 'EXECUTE': 1, 'READ': 2, 'UPDATE': 3, 'CONTROL': 4, 'ALTER': 5}
+      audit_required = False
+      required_audit_threshold = 'NONE'
+      user_ids = set(irrdbu00.users['USBD_NAME'].astype(str).str.upper())
+      group_ids = set(irrdbu00.groups['GPBD_NAME'].astype(str).str.upper())
+      all_profiles = irrdbu00.datasets
+      all_access = irrdbu00.datasetAccess
+
+      def auth_type(value):
+          auth_id = str(value).upper()
+          if auth_id in user_ids:
+              return 'USER'
+          if auth_id in group_ids:
+              return 'GROUP'
+          return 'UNRESOLVED'
+
+      def matches(pattern, value):
+          expression = re.escape(str(pattern))
+          expression = expression.replace(r'\*\*', '.*')
+          expression = expression.replace(r'\*', '[^.]*').replace('%', '[^.]')
+          return re.fullmatch(expression, value) is not None
+
+      hard_issues = []
+      review_access = {}
+      for library in libraries:
+          profiles = all_profiles[all_profiles['DSBD_NAME'] == library].copy()
+          if profiles.empty:
+              candidates = all_profiles[
+                  all_profiles['DSBD_NAME'].map(
+                      lambda pattern: matches(pattern, library)
+                  )
+              ].copy()
+              if not candidates.empty:
+                  candidates['_specificity'] = candidates['DSBD_NAME'].str.replace(
+                      '*', '', regex=False
+                  ).str.replace('%', '', regex=False).str.len()
+                  best = candidates['_specificity'].max()
+                  profiles = candidates[candidates['_specificity'] == best].copy()
+
+          if profiles.empty:
+              hard_issues.append(f'{library}: no covering RACF profile')
+              continue
+
+          for _, profile in profiles.iterrows():
+              uacc = str(profile['DSBD_UACC']).upper()
+              level = str(profile['DSBD_AUDIT_LEVEL']).upper()
+              okqual = str(profile['DSBD_AUDIT_OKQUAL']).upper()
+              if ranks.get(uacc, 99) > ranks['READ']:
+                  hard_issues.append(f'{library}: UACC={uacc}')
+              if audit_required and not (
+                  level == 'ALL' and
+                  ranks.get(okqual, 99) <= ranks[required_audit_threshold]
+              ):
+                  hard_issues.append(
+                      f'{library}: AUDIT={level}({okqual or "NONE"})'
+                  )
+
+              related = all_access[
+                  (all_access['DSACC_NAME'] == profile['DSBD_NAME']) &
+                  (
+                      all_access['DSACC_ACCESS'].map(
+                          lambda value: ranks.get(str(value).upper(), -1)
+                      ) >= ranks['UPDATE']
+                  )
+              ]
+              for _, permit in related.iterrows():
+                  auth_id = str(permit['DSACC_AUTH_ID']).upper()
+                  access = str(permit['DSACC_ACCESS']).upper()
+                  item = review_access.setdefault(auth_id, {
+                      'auth_type': auth_type(auth_id),
+                      'max_access': access,
+                      'libraries': set(),
+                  })
+                  if ranks.get(access, -1) > ranks.get(item['max_access'], -1):
+                      item['max_access'] = access
+                  item['libraries'].add(library)
+
+      sysprog = {str(x).upper() for x in sysprog_list} if sysprog_list else None
+
+      def _approved(auth_id):
+          if sysprog is None:
+              return 'UNREVIEWED'
+          return 'YES' if str(auth_id).upper() in sysprog else 'NO'
+
+      findings = [
+          {
+              'AUTH_ID': auth_id,
+              'AUTH_TYPE': item['auth_type'],
+              'MAX_ACCESS': item['max_access'],
+              'LIBRARY_COUNT': len(item['libraries']),
+              'LIBRARIES': ', '.join(sorted(item['libraries'])),
+              'APPROVED': _approved(auth_id),
+          }
+          for auth_id, item in sorted(review_access.items())
+      ]
+      unapproved = [f for f in findings if f['APPROVED'] != 'YES']
+
+      hard_issues = sorted(set(hard_issues))
+      if hard_issues:
+          status = 'FAIL'
+          detail = (
+              f'{len(hard_issues)} master catalog protection issue(s): ' +
+              '; '.join(hard_issues[:10]) +
+              ('; ...' if len(hard_issues) > 10 else '') +
+              f'; {len(unapproved)} unique UPDATE-or-greater '
+              'user/group ID(s) require validation'
+          )
+      elif unapproved:
+          status = 'REVIEW'
+          detail = (
+              f'master catalog profile settings meet technical thresholds; validate '
+              f'{len(unapproved)} unique UPDATE-or-greater '
+              'user/group ID(s) not in the system-programmer list'
+          )
+      elif findings:
+          status = 'PASS'
+          detail = (
+              f'master catalog write access is limited to {len(findings)} approved '
+              'system-programmer ID(s)'
+          )
+      else:
+          status = 'PASS'
+          detail = f'All {len(libraries)} master catalog entries meet the technical thresholds'
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    Review access authorization to critical system files.
+
+    Evaluate the impact of correcting the deficiency.
+
+    Develop a plan of action and implement the changes as required to protect the MASTER CATALOG.
+
+    Configure the ESM rules for system catalog to only allow access above "READ" to systems programmers and those authorized by the ISSM/ISSO.
+
+    Configure ESM rules for the master catalog to allow access above "READ" to systems programmers ONLY.
+
+    Configure ESM rules for the master catalog to allow any products or procedures system programmer access for system-level maintenance that meets the following specific case:
+    - The batch job or procedure must be documented in the SITE Security Plan.
+    - Reside in a data set that is restricted to systems programmers' access only.
+
+    All greater than read access must be logged.
+  source_metadata:
+    vulnerability_id: V-223666
+    rule_id: SV-223666r1137691_rule
+    rule_version: RACF-ES-000180
+    check_id: C-25339r868801_chk
+    fix_id: F-25327r868802_fix
+    cci: CCI-000213
+    documentable: 'false'
+    coverage: HYBRID
+    evidence_note: The runtime master catalog list (inventory 'master_catalog') supplies the active master
+      catalog data set name(s). Profile coverage and UACC (greater than READ) are automated; unique UPDATE-or-greater
+      user/group IDs are returned for role validation.
+- control_id: STIG-V-223667
+  title: IBM RACF must limit Write or greater access to SYS1.UADS to system programmers only, and WRITE
+    or greater access must be limited to system programmer personnel and/or security personnel.
+  severity: high
+  requirement: |-
+    Discussion:
+    To mitigate the risk of unauthorized access to sensitive information by entities that have been issued certificates by DoD-approved PKIs, all DoD systems (e.g., web servers and web portals) must be properly configured to incorporate access control methods that do not rely solely on the possession of a certificate for access. Successful authentication must not automatically give an entity access to an asset or security boundary. Authorization procedures and controls must be implemented to ensure each authenticated entity also has a validated and current authorization. Authorization is the process of determining whether an entity, once authenticated, is permitted to access a specific asset. Information systems use access control policies and enforcement mechanisms to implement this requirement.
+
+    Satisfies: SRG-OS-000080-GPOS-00048, SRG-OS-000324-GPOS-00125
+
+    Check procedure:
+    The ESM data set rules for SYS1.UADS restrict WRITE or Greater access to only z/OS systems programming personnel.
+
+    The ESM data set rules for SYS1.UADS restrict READ and/or UPDATE access to z/OS systems programming personnel and/or security personnel.
+
+    The ESM data set rules for SYS1.UADS restrict READ access to auditors as documented in Security Plan.
+
+    The ESM data set rules for SYS1.UADS specify that all (i.e., failures and successes) data set access authorities (i.e., READ, UPDATE, ALTER, and CONTROL) will be logged.
+
+    If all of the above are untrue, this is not a finding.
+
+    If any of the above is true, this is a finding.
+  stig:
+    rule_id: SV-223667r1137691_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-ES-000190
+    reference: V-223667 | SV-223667r1137691_rule | CCI-000213
+  data_sources_needed:
+  - irrdbu00
+  implementation:
+    engine: python
+    dataset: irrdbu00.datasets
+    logic: |
+      import re
+
+      target = 'SYS1.UADS'
+      ranks = {'NONE': 0, 'EXECUTE': 1, 'READ': 2, 'UPDATE': 3, 'CONTROL': 4, 'ALTER': 5}
+      user_ids = set(irrdbu00.users['USBD_NAME'].astype(str).str.upper())
+      group_ids = set(irrdbu00.groups['GPBD_NAME'].astype(str).str.upper())
+
+      def auth_type(value):
+          auth_id = str(value).upper()
+          if auth_id in user_ids:
+              return 'USER'
+          if auth_id in group_ids:
+              return 'GROUP'
+          return 'UNRESOLVED'
+
+      all_profiles = irrdbu00.datasets
+      profiles = all_profiles[all_profiles['DSBD_NAME'] == target].copy()
+      if profiles.empty:
+          def matches(pattern, value):
+              expression = re.escape(str(pattern))
+              expression = expression.replace(r'\*\*', '.*')
+              expression = expression.replace(r'\*', '[^.]*').replace('%', '[^.]')
+              return re.fullmatch(expression, value) is not None
+
+          candidates = all_profiles[
+              all_profiles['DSBD_NAME'].map(lambda pattern: matches(pattern, target))
+          ].copy()
+          if not candidates.empty:
+              candidates['_specificity'] = candidates['DSBD_NAME'].str.replace(
+                  '*', '', regex=False
+              ).str.replace('%', '', regex=False).str.len()
+              best = candidates['_specificity'].max()
+              profiles = candidates[candidates['_specificity'] == best].copy()
+      access = irrdbu00.datasetAccess
+      sysprog = {str(x).upper() for x in sysprog_list} if sysprog_list else None
+
+      def _approved(auth_id):
+          if sysprog is None:
+              return 'UNREVIEWED'
+          return 'YES' if str(auth_id).upper() in sysprog else 'NO'
+
+      findings = []
+      hard_issues = []
+      review_rows = 0
+      unapproved_rows = 0
+
+      if profiles.empty:
+          hard_issues.append('No covering RACF data-set profile was found')
+          findings.append({
+              'DSBD_NAME': target, 'DSBD_UACC': 'MISSING',
+              'DSBD_AUDIT_LEVEL': 'MISSING', 'DSBD_AUDIT_OKQUAL': 'MISSING',
+              'DSACC_AUTH_ID': '', 'AUTH_TYPE': '', 'DSACC_ACCESS': '', 'APPROVED': ''
+          })
+      else:
+          for _, profile in profiles.iterrows():
+              uacc = str(profile['DSBD_UACC']).upper()
+              audit_level = str(profile['DSBD_AUDIT_LEVEL']).upper()
+              audit_qual = str(profile['DSBD_AUDIT_OKQUAL']).upper()
+              uacc_ok = ranks.get(uacc, 99) <= ranks['NONE']
+              audit_ok = (
+                  audit_level == 'ALL' and
+                  ranks.get(audit_qual, 99) <= ranks['READ']
+              )
+              if not uacc_ok:
+                  hard_issues.append(f'UACC={uacc} exceeds NONE')
+              if not audit_ok:
+                  hard_issues.append(
+                      f'AUDIT={audit_level}({audit_qual or "NONE"}) does not log '
+                      f'all successful and failed READ-or-greater access'
+                  )
+
+              related = access[
+                  (access['DSACC_NAME'] == profile['DSBD_NAME']) &
+                  (
+                      access['DSACC_ACCESS'].map(
+                          lambda value: ranks.get(str(value).upper(), -1)
+                      ) >= ranks['READ']
+                  )
+              ]
+              review_rows += len(related)
+              if related.empty:
+                  findings.append({
+                      'DSBD_NAME': profile['DSBD_NAME'],
+                      'DSBD_UACC': uacc,
+                      'DSBD_AUDIT_LEVEL': audit_level,
+                      'DSBD_AUDIT_OKQUAL': audit_qual,
+                      'DSACC_AUTH_ID': '',
+                      'AUTH_TYPE': '',
+                      'DSACC_ACCESS': '',
+                      'APPROVED': ''
+                  })
+              else:
+                  for _, permit in related.iterrows():
+                      appr = _approved(permit['DSACC_AUTH_ID'])
+                      if appr != 'YES':
+                          unapproved_rows += 1
+                      findings.append({
+                          'DSBD_NAME': profile['DSBD_NAME'],
+                          'DSBD_UACC': uacc,
+                          'DSBD_AUDIT_LEVEL': audit_level,
+                          'DSBD_AUDIT_OKQUAL': audit_qual,
+                          'DSACC_AUTH_ID': permit['DSACC_AUTH_ID'],
+                          'AUTH_TYPE': auth_type(permit['DSACC_AUTH_ID']),
+                          'DSACC_ACCESS': permit['DSACC_ACCESS'],
+                          'APPROVED': appr
+                      })
+
+      hard_issues = sorted(set(hard_issues))
+      if hard_issues:
+          status = 'FAIL'
+          detail = target + ': ' + '; '.join(hard_issues)
+      elif unapproved_rows:
+          status = 'REVIEW'
+          detail = (
+              f'RACF profile settings for {target} meet the technical thresholds; '
+              f'validate {unapproved_rows} permit(s) not in the system-programmer list'
+          )
+      elif review_rows:
+          status = 'PASS'
+          detail = (
+              f'Write access to {target} is limited to {review_rows} approved '
+              'system-programmer permit(s)'
+          )
+      else:
+          status = 'PASS'
+          detail = f'RACF profile settings for {target} meet the technical thresholds'
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    Evaluate the impact of correcting any deficiency. Develop a plan of action and implement the changes as required to protect SYS1.UADS.
+    SYS1.UADS WRITE or Greater authority is limited to the systems programming staff.
+    READ and/or UPDATE access should be limited to the security staff.
+    READ access is limited to Auditors when included in the site security plan.
+    Configure allocate access to SYS1.UADS to be limited to system programmers only, Read and Update access to SYS1.UADS to be limited to system programmer personnel and/or security personnel, and all dataset access is logged.
+  source_metadata:
+    vulnerability_id: V-223667
+    rule_id: SV-223667r1137691_rule
+    rule_version: RACF-ES-000190
+    check_id: C-25340r514690_chk
+    fix_id: F-25328r514691_fix
+    cci: CCI-000213
+    documentable: 'false'
+    coverage: HYBRID
+    evidence_note: Profile existence, UACC, and auditing are automated. Explicit access IDs require comparison
+      with approved personnel roles.
+- control_id: STIG-V-223668
+  title: IBM z/OS must protect dynamic lists in accordance with proper security requirements.
+  severity: high
+  requirement: |-
+    Discussion:
+    To mitigate the risk of unauthorized access to sensitive information by entities that have been issued certificates by DoD-approved PKIs, all DoD systems (e.g., web servers and web portals) must be properly configured to incorporate access control methods that do not rely solely on the possession of a certificate for access. Successful authentication must not automatically give an entity access to an asset or security boundary. Authorization procedures and controls must be implemented to ensure each authenticated entity also has a validated and current authorization. Authorization is the process of determining whether an entity, once authenticated, is permitted to access a specific asset. Information systems use access control policies and enforcement mechanisms to implement this requirement.
+
+    Satisfies: SRG-OS-000080-GPOS-00048, SRG-OS-000324-GPOS-00125
+
+    Check procedure:
+    Execute RACF command:
+    RLIST FACILITY *
+
+    If the RACF resources and/or generic equivalent identified below are defined with AUDIT(ALL(READ)) and WRITE or greater access restricted to system programming personnel, this is not a finding.
+
+    CSVAPF.
+    CSVAPF.MVS.SETPROG.FORMAT.DYNAMIC
+    CSVAPF.MVS.SETPROG.FORMAT.STATIC
+    CSVDYLPA.
+    CSVDYNEX.
+    CSVDYNEX.LIST
+    CSVDYNL.
+    CSVDYNL.UPDATE.LNKLST
+    CSVLLA.
+
+    If the RACF CSVDYNEX.LIST resource and/or generic equivalent is defined with AUDIT(FAILURE(READ)SUCCESS(UPDATE)) and WRITE or greater access restricted to system programming personnel, this is not a finding.
+
+    If the RACF CSVDYNEX.LIST resource and/or generic equivalent is defined with READ access restricted to auditors, this is not a finding.
+
+    If the products CICS and/or CONTROL-O are on the system, the RACF access to the CSVLLA resource and/or generic equivalent will be defined with AUDIT(ALL) and UPDATE access restricted to the CICS and CONTROL-O STC userids.
+
+    If any software product requires access to dynamic LPA updates on the system, the RACF access to the CSVDYLPA resource and/or generic equivalent will be defined with LOG and SERVICE(UPDATE) only after the product has been validated with the appropriate STIG or SRG for compliance AND receives documented and filed authorization that details the need and any accepted risks from the site ISSM or equivalent security authority.
+
+    Note: In the above, UPDATE access can be substituted with ALTER or CONTROL. Review the permissions in the IBM documentation when specifying UPDATE.
+  stig:
+    rule_id: SV-223668r1137691_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-ES-000200
+    reference: V-223668 | SV-223668r1137691_rule | CCI-000213
+  data_sources_needed:
+  - irrdbu00
+  implementation:
+    engine: python
+    dataset: irrdbu00.generals
+    logic: |
+      import re
+
+      resources = [
+          'CSVAPF.', 'CSVAPF.MVS.SETPROG.FORMAT.DYNAMIC',
+          'CSVAPF.MVS.SETPROG.FORMAT.STATIC', 'CSVDYLPA.',
+          'CSVDYNEX.', 'CSVDYNEX.LIST', 'CSVDYNL.',
+          'CSVDYNL.UPDATE.LNKLST', 'CSVLLA.'
+      ]
+      ranks = {'NONE': 0, 'EXECUTE': 1, 'READ': 2, 'UPDATE': 3, 'CONTROL': 4, 'ALTER': 5}
+      user_ids = set(irrdbu00.users['USBD_NAME'].astype(str).str.upper())
+      group_ids = set(irrdbu00.groups['GPBD_NAME'].astype(str).str.upper())
+
+      def auth_type(value):
+          auth_id = str(value).upper()
+          if auth_id in user_ids:
+              return 'USER'
+          if auth_id in group_ids:
+              return 'GROUP'
+          return 'UNRESOLVED'
+
+      profiles = irrdbu00.generals[
+          irrdbu00.generals['GRBD_CLASS_NAME'] == 'FACILITY'
+      ].copy()
+      access = irrdbu00.generalAccess[
+          irrdbu00.generalAccess['GRACC_CLASS_NAME'] == 'FACILITY'
+      ].copy()
+
+      def matches(pattern, resource):
+          expression = re.escape(str(pattern))
+          expression = expression.replace(r'\*\*', '.*').replace(r'\*', '.*')
+          expression = expression.replace('%', '.')
+          return re.fullmatch(expression, resource) is not None
+
+      sysprog = {str(x).upper() for x in sysprog_list} if sysprog_list else None
+
+      def _approved(auth_id):
+          if sysprog is None:
+              return 'UNREVIEWED'
+          return 'YES' if str(auth_id).upper() in sysprog else 'NO'
+
+      findings = []
+      hard_issues = []
+      review_rows = 0
+      unapproved_rows = 0
+      for resource in resources:
+          candidates = profiles[
+              profiles['GRBD_NAME'].map(lambda pattern: matches(pattern, resource))
+          ].copy()
+          if candidates.empty:
+              hard_issues.append(f'{resource}: no covering FACILITY profile')
+              findings.append({
+                  'RESOURCE': resource, 'GRBD_NAME': 'MISSING', 'GRBD_UACC': '',
+                  'GRBD_AUDIT_LEVEL': '', 'GRBD_AUDIT_OKQUAL': '',
+                  'GRACC_AUTH_ID': '', 'AUTH_TYPE': '', 'GRACC_ACCESS': '', 'APPROVED': ''
+              })
+              continue
+          candidates['_specificity'] = candidates['GRBD_NAME'].str.replace(
+              '*', '', regex=False
+          ).str.replace('%', '', regex=False).str.len()
+          profile = candidates.sort_values('_specificity', ascending=False).iloc[0]
+          uacc = str(profile['GRBD_UACC']).upper()
+          level = str(profile['GRBD_AUDIT_LEVEL']).upper()
+          okqual = str(profile['GRBD_AUDIT_OKQUAL']).upper()
+          if ranks.get(uacc, 99) > ranks['READ']:
+              hard_issues.append(f'{resource}: UACC={uacc}')
+          if not (level == 'ALL' and ranks.get(okqual, 99) <= ranks['READ']):
+              hard_issues.append(f'{resource}: AUDIT={level}({okqual or "NONE"})')
+
+          related = access[
+              (access['GRACC_NAME'] == profile['GRBD_NAME']) &
+              (
+                  access['GRACC_ACCESS'].map(
+                      lambda value: ranks.get(str(value).upper(), -1)
+                  ) >= ranks['UPDATE']
+              )
+          ]
+          review_rows += len(related)
+          if related.empty:
+              findings.append({
+                  'RESOURCE': resource, 'GRBD_NAME': profile['GRBD_NAME'],
+                  'GRBD_UACC': uacc, 'GRBD_AUDIT_LEVEL': level,
+                  'GRBD_AUDIT_OKQUAL': okqual, 'GRACC_AUTH_ID': '',
+                  'AUTH_TYPE': '',
+                  'GRACC_ACCESS': '', 'APPROVED': ''
+              })
+          else:
+              for _, permit in related.iterrows():
+                  appr = _approved(permit['GRACC_AUTH_ID'])
+                  if appr != 'YES':
+                      unapproved_rows += 1
+                  findings.append({
+                      'RESOURCE': resource, 'GRBD_NAME': profile['GRBD_NAME'],
+                      'GRBD_UACC': uacc, 'GRBD_AUDIT_LEVEL': level,
+                      'GRBD_AUDIT_OKQUAL': okqual,
+                      'GRACC_AUTH_ID': permit['GRACC_AUTH_ID'],
+                      'AUTH_TYPE': auth_type(permit['GRACC_AUTH_ID']),
+                      'GRACC_ACCESS': permit['GRACC_ACCESS'],
+                      'APPROVED': appr
+                  })
+
+      hard_issues = sorted(set(hard_issues))
+      if hard_issues:
+          status = 'FAIL'
+          detail = '; '.join(hard_issues)
+      elif unapproved_rows:
+          status = 'REVIEW'
+          detail = (
+              f'Technical profile settings pass; validate {unapproved_rows} '
+              'WRITE-or-greater permit(s) not in the system-programmer list'
+          )
+      elif review_rows:
+          status = 'PASS'
+          detail = (
+              f'Dynamic-list WRITE access is limited to {review_rows} approved '
+              'system-programmer permit(s)'
+          )
+      else:
+          status = 'PASS'
+          detail = 'Required dynamic-list resources have restrictive profiles and auditing'
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    Configure the Dynamic List resources to be defined to the RACF FACILITY resource class and protected. Only system programmers and a limited number of authorized users and approved authorized Started Tasks are able to issue these commands. All access is logged.
+
+    The required CSV-prefixed Facility Class resources are listed below. These resources or generic equivalents should be defined and permitted as required with only z/OS systems programmers and logging enabled. Minimum required list of CSV-prefixed resources:
+
+    CSVAPF.**
+    CSVAPF.MVS.SETPROG.FORMAT.DYNAMIC
+    CSVAPF.MVS.SETPROG.FORMAT.STATIC
+    CSVDYLPA.**
+    CSVDYLPA.ADD.**
+    CSVDYLPA.DELETE.**
+    CSVDYNEX.**
+    CSVDYNEX.LIST
+    CSVDYNL.**
+    CSVDYNL.UPDATE.LNKLST
+    CSVLLA.**
+
+    Limit authority to those resources to z/OS systems programmers. Restrict to the absolute minimum number of personnel with AUDIT(ALL(READ)) and UPDATE access.
+
+    Sample commands are shown here to accomplish this:
+
+    RDEF FACILITY CSVAPF.** UACC(NONE) OWNER(syspsmpl) AUDIT(ALL(READ))
+    RDEF FACILITY CSVAPF.MVS.SETPROG.FORMAT.DYNAMIC.** UACC(NONE) OWNER(syspsmpl) AUDIT(ALL(READ))
+    RDEF FACILITY CSVAPF.MVS.SETPROG.FORMAT.STATIC.** UACC(NONE) OWNER(syspsmpl) AUDIT(ALL(READ))
+
+    PERMIT CSVAPF.** CLASS(FACILITY) ID(syspsmpl) ACCESS(UPDATE)
+    PERMIT CSVAPF.MVS.SETPROG.SETPROG.FORMAT.DYNAMIC.** CLASS(FACILITY) ID(syspsmpl) ACCESS(UPDATE)
+    PERMIT CSVAPF.MVS.SETPROG.SETPROG.FORMAT.STATIC.** CLASS(FACILITY) ID(syspsmpl) ACCESS(UPDATE)
+
+    The CSVDYLPA.ADD resource will be permitted to products BMC Mainview, CA 1, and CA Common Services STC userids with AUDIT(ALL(READ)) and UPDATE access.
+
+    The CSVDYLPA.DELETE resource will be permitted to products CA 1 and CA Common Services STC userids with AUDIT(ALL(READ)) and UPDATE access.
+
+    Sample commands are shown here to accomplish one set of resources:
+
+    RDEF FACILITY CSVDYLPA.** UACC(NONE) OWNER(syspsmpl) AUDIT(ALL(READ))
+    RDEF FACILITY CSVDYLPA.ADD.** UACC(NONE) OWNER(syspsmpl) AUDIT(ALL(READ))
+    RDEF FACILITY CSVDYLPA.DELETE.** UACC(NONE) OWNER(syspsmpl) AUDIT(ALL(READ))
+
+    PERMIT CSVDYLPA.** CLASS(FACILITY) ID(syspsmpl) ACCESS(UPDATE)
+    PERMIT CSVDYLPA.** CLASS(FACILITY) ID(BMC Mainview STC userid) ACCESS(UPDATE)
+    PERMIT CSVDYLPA.** CLASS(FACILITY) ID(CA 1 STC userid) ACCESS(UPDATE)
+    PERMIT CSVDYLPA.** CLASS(FACILITY) ID(CCS STC userid) ACCESS(UPDATE)
+    PERMIT CSVDYLPA.ADD.** CLASS(FACILITY) ID(syspsmpl) ACCESS(UPDATE)
+    PERMIT CSVDYLPA.ADD.** CLASS(FACILITY) ID(BMC Mainview STC userid) ACCESS(UPDATE)
+    PERMIT CSVDYLPA.ADD.** CLASS(FACILITY) ID(CA 1 STC userid) ACCESS(UPDATE)
+    PERMIT CSVDYLPA.ADD.** CLASS(FACILITY) ID(CCS STC userid) ACCESS(UPDATE)
+    PERMIT CSVDYLPA.DELETE.** CLASS(FACILITY) ID(syspsmpl) ACCESS(UPDATE)
+    PERMIT CSVDYLPA.DELETE.** CLASS(FACILITY) ID(CA 1 STC userid) ACCESS(UPDATE)
+    PERMIT CSVDYLPA.DELETE.** CLASS(FACILITY) ID(CCS STC userid) ACCESS(UPDATE)
+
+    The CSVDYNEX.LIST resource and/or generic equivalent will be defined with AUDIT(FAILURE(READ)SUCCESS(UPDATE)) and UPDATE access restricted to system programming personnel.
+
+    The CSVDYNEX.LIST resource and/or generic equivalent will be defined with READ access restricted to auditors.
+
+    Sample commands are shown here to accomplish this:
+
+    RDEF FACILITY CSVDYNEX.** UACC(NONE) OWNER(syspsmpl) -
+    AUDIT(ALL(READ))
+    RDEF FACILITY CSVDYNEX.LIST.** UACC(NONE) OWNER(syspsmpl) -
+    AUDIT(FAILURE(READ)SUCCESS(UPDATE))
+
+    PERMIT CSVDYNEX.** CLASS(FACILITY) ID(syspsmpl) ACCESS(UPDATE)
+    PERMIT CSVDYNEX.LIST.** CLASS(FACILITY) ID(syspsmpl) ACCESS(UPDATE)
+    PERMIT CSVDYNEX.LIST.** CLASS(FACILITY) ID(smplsmpl) ACCESS(READ)
+
+    The CSVLLA resource will be permitted to CICS and CONTROL-O STC userids with AUDIT(ALL(READ)) and UPDATE access.
+
+    Sample commands are shown here to accomplish one set of resources:
+
+    RDEF FACILITY CSVLLA.** UACC(NONE) OWNER(syspsmpl) AUDIT(ALL(READ))
+
+    PERMIT CSVLLA.** CLASS(FACILITY) ID(syspsmpl) ACCESS(UPDATE)
+    PERMIT CSVLLA.** CLASS(FACILITY) ID(CICS STC userids) ACCESS(UPDATE)
+    PERMIT CSVLLA.** CLASS(FACILITY) ID(CONTROL-O STC userid) ACCESS(UPDATE)
+  source_metadata:
+    vulnerability_id: V-223668
+    rule_id: SV-223668r1137691_rule
+    rule_version: RACF-ES-000200
+    check_id: C-25341r514693_chk
+    fix_id: F-25329r868804_fix
+    cci: CCI-000213
+    documentable: 'false'
+    coverage: HYBRID
+    evidence_note: FACILITY profile coverage, UACC, and auditing are automated; WRITE-or-greater permit
+      holders require role validation.
+- control_id: STIG-V-223674
+  title: IBM RACF must limit Write or greater access to SYS1.IMAGELIB to system programmers only.
+  severity: high
+  requirement: |-
+    Discussion:
+    To mitigate the risk of unauthorized access to sensitive information by entities that have been issued certificates by DoD-approved PKIs, all DoD systems (e.g., web servers and web portals) must be properly configured to incorporate access control methods that do not rely solely on the possession of a certificate for access. Successful authentication must not automatically give an entity access to an asset or security boundary. Authorization procedures and controls must be implemented to ensure each authenticated entity also has a validated and current authorization. Authorization is the process of determining whether an entity, once authenticated, is permitted to access a specific asset. Information systems use access control policies and enforcement mechanisms to implement this requirement.
+
+    Satisfies: SRG-OS-000080-GPOS-00048, SRG-OS-000259-GPOS-00100
+
+    Check procedure:
+    Execute a dataset list of access for SYS1.IMAGELIB.
+
+    If the following guidance is true, this is not a finding.
+
+    -The ACP data set rules for SYS1.IMAGELIB do not restrict WRITER or greater access to only systems programming personnel.
+    -The ACP data set rules for SYS1.IMAGELIB do not specify that all (i.e., failures and successes) WRITER or greater access will be logged.
+  stig:
+    rule_id: SV-223674r1137691_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-ES-000260
+    reference: V-223674 | SV-223674r1137691_rule | CCI-000213
+  data_sources_needed:
+  - irrdbu00
+  implementation:
+    engine: python
+    dataset: irrdbu00.datasets
+    logic: |
+      import re
+
+      target = 'SYS1.IMAGELIB'
+      ranks = {'NONE': 0, 'EXECUTE': 1, 'READ': 2, 'UPDATE': 3, 'CONTROL': 4, 'ALTER': 5}
+      user_ids = set(irrdbu00.users['USBD_NAME'].astype(str).str.upper())
+      group_ids = set(irrdbu00.groups['GPBD_NAME'].astype(str).str.upper())
+
+      def auth_type(value):
+          auth_id = str(value).upper()
+          if auth_id in user_ids:
+              return 'USER'
+          if auth_id in group_ids:
+              return 'GROUP'
+          return 'UNRESOLVED'
+
+      all_profiles = irrdbu00.datasets
+      profiles = all_profiles[all_profiles['DSBD_NAME'] == target].copy()
+      if profiles.empty:
+          def matches(pattern, value):
+              expression = re.escape(str(pattern))
+              expression = expression.replace(r'\*\*', '.*')
+              expression = expression.replace(r'\*', '[^.]*').replace('%', '[^.]')
+              return re.fullmatch(expression, value) is not None
+
+          candidates = all_profiles[
+              all_profiles['DSBD_NAME'].map(lambda pattern: matches(pattern, target))
+          ].copy()
+          if not candidates.empty:
+              candidates['_specificity'] = candidates['DSBD_NAME'].str.replace(
+                  '*', '', regex=False
+              ).str.replace('%', '', regex=False).str.len()
+              best = candidates['_specificity'].max()
+              profiles = candidates[candidates['_specificity'] == best].copy()
+      access = irrdbu00.datasetAccess
+      sysprog = {str(x).upper() for x in sysprog_list} if sysprog_list else None
+
+      def _approved(auth_id):
+          if sysprog is None:
+              return 'UNREVIEWED'
+          return 'YES' if str(auth_id).upper() in sysprog else 'NO'
+
+      findings = []
+      hard_issues = []
+      review_rows = 0
+      unapproved_rows = 0
+
+      if profiles.empty:
+          hard_issues.append('No covering RACF data-set profile was found')
+          findings.append({
+              'DSBD_NAME': target, 'DSBD_UACC': 'MISSING',
+              'DSBD_AUDIT_LEVEL': 'MISSING', 'DSBD_AUDIT_OKQUAL': 'MISSING',
+              'DSACC_AUTH_ID': '', 'AUTH_TYPE': '', 'DSACC_ACCESS': '', 'APPROVED': ''
+          })
+      else:
+          for _, profile in profiles.iterrows():
+              uacc = str(profile['DSBD_UACC']).upper()
+              audit_level = str(profile['DSBD_AUDIT_LEVEL']).upper()
+              audit_qual = str(profile['DSBD_AUDIT_OKQUAL']).upper()
+              uacc_ok = ranks.get(uacc, 99) <= ranks['READ']
+              audit_ok = (
+                  audit_level == 'ALL' and
+                  ranks.get(audit_qual, 99) <= ranks['UPDATE']
+              )
+              if not uacc_ok:
+                  hard_issues.append(f'UACC={uacc} exceeds READ')
+              if not audit_ok:
+                  hard_issues.append(
+                      f'AUDIT={audit_level}({audit_qual or "NONE"}) does not log '
+                      f'all successful and failed UPDATE-or-greater access'
+                  )
+
+              related = access[
+                  (access['DSACC_NAME'] == profile['DSBD_NAME']) &
+                  (
+                      access['DSACC_ACCESS'].map(
+                          lambda value: ranks.get(str(value).upper(), -1)
+                      ) >= ranks['UPDATE']
+                  )
+              ]
+              review_rows += len(related)
+              if related.empty:
+                  findings.append({
+                      'DSBD_NAME': profile['DSBD_NAME'],
+                      'DSBD_UACC': uacc,
+                      'DSBD_AUDIT_LEVEL': audit_level,
+                      'DSBD_AUDIT_OKQUAL': audit_qual,
+                      'DSACC_AUTH_ID': '',
+                      'AUTH_TYPE': '',
+                      'DSACC_ACCESS': '',
+                      'APPROVED': ''
+                  })
+              else:
+                  for _, permit in related.iterrows():
+                      appr = _approved(permit['DSACC_AUTH_ID'])
+                      if appr != 'YES':
+                          unapproved_rows += 1
+                      findings.append({
+                          'DSBD_NAME': profile['DSBD_NAME'],
+                          'DSBD_UACC': uacc,
+                          'DSBD_AUDIT_LEVEL': audit_level,
+                          'DSBD_AUDIT_OKQUAL': audit_qual,
+                          'DSACC_AUTH_ID': permit['DSACC_AUTH_ID'],
+                          'AUTH_TYPE': auth_type(permit['DSACC_AUTH_ID']),
+                          'DSACC_ACCESS': permit['DSACC_ACCESS'],
+                          'APPROVED': appr
+                      })
+
+      hard_issues = sorted(set(hard_issues))
+      if hard_issues:
+          status = 'FAIL'
+          detail = target + ': ' + '; '.join(hard_issues)
+      elif unapproved_rows:
+          status = 'REVIEW'
+          detail = (
+              f'RACF profile settings for {target} meet the technical thresholds; '
+              f'validate {unapproved_rows} permit(s) not in the system-programmer list'
+          )
+      elif review_rows:
+          status = 'PASS'
+          detail = (
+              f'Write access to {target} is limited to {review_rows} approved '
+              'system-programmer permit(s)'
+          )
+      else:
+          status = 'PASS'
+          detail = f'RACF profile settings for {target} meet the technical thresholds'
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    Configure UPDATE and/or ALLOCATE access to SYS1.IMAGELIB to be limited to system programmers only and all WRITE or greater access is logged.
+
+    Review access authorization to critical system files. Evaluate the impact of correcting the deficiency. Develop a plan of action and implement the changes as required to protect SYS1.IMAGELIB.
+
+    SYS1.IMAGELIB is automatically APF-authorized. This data set contains modules, images, tables, and character sets which are essential to system print services.
+  source_metadata:
+    vulnerability_id: V-223674
+    rule_id: SV-223674r1137691_rule
+    rule_version: RACF-ES-000260
+    check_id: C-25347r514711_chk
+    fix_id: F-25335r514712_fix
+    cci: CCI-000213
+    documentable: 'false'
+    coverage: HYBRID
+    evidence_note: Profile existence, UACC, and auditing are automated. Explicit access IDs require comparison
+      with approved personnel roles.
+- control_id: STIG-V-223675
+  title: IBM RACF must limit Write or greater access to SYS1.SVCLIB to appropriate authorized users.
+  severity: high
+  requirement: |-
+    Discussion:
+    To mitigate the risk of unauthorized access to sensitive information by entities that have been issued certificates by DoD-approved PKIs, all DoD systems (e.g., web servers and web portals) must be properly configured to incorporate access control methods that do not rely solely on the possession of a certificate for access. Successful authentication must not automatically give an entity access to an asset or security boundary. Authorization procedures and controls must be implemented to ensure each authenticated entity also has a validated and current authorization. Authorization is the process of determining whether an entity, once authenticated, is permitted to access a specific asset. Information systems use access control policies and enforcement mechanisms to implement this requirement.
+
+    Satisfies: SRG-OS-000080-GPOS-00048, SRG-OS-000259-GPOS-00100, SRG-OS-000324-GPOS-00125
+
+    Check procedure:
+    Execute a dataset list of access for SYS1.SVCLIB.
+
+    If all of the following are true, this is not a finding.
+
+    If any of the following are untrue, this is a finding.
+
+    -ESM data set rules for SYS1.SVCLIB restrict WRITE or greater access to only z/OS systems programming personnel.
+    -ESM data set rules for SYS1.SVCLIB specify that all (i.e., failures and successes) WRITE or greater access will be logged.
+  stig:
+    rule_id: SV-223675r1137691_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-ES-000270
+    reference: V-223675 | SV-223675r1137691_rule | CCI-000213
+  data_sources_needed:
+  - irrdbu00
+  implementation:
+    engine: python
+    dataset: irrdbu00.datasets
+    logic: |
+      import re
+
+      target = 'SYS1.SVCLIB'
+      ranks = {'NONE': 0, 'EXECUTE': 1, 'READ': 2, 'UPDATE': 3, 'CONTROL': 4, 'ALTER': 5}
+      user_ids = set(irrdbu00.users['USBD_NAME'].astype(str).str.upper())
+      group_ids = set(irrdbu00.groups['GPBD_NAME'].astype(str).str.upper())
+
+      def auth_type(value):
+          auth_id = str(value).upper()
+          if auth_id in user_ids:
+              return 'USER'
+          if auth_id in group_ids:
+              return 'GROUP'
+          return 'UNRESOLVED'
+
+      all_profiles = irrdbu00.datasets
+      profiles = all_profiles[all_profiles['DSBD_NAME'] == target].copy()
+      if profiles.empty:
+          def matches(pattern, value):
+              expression = re.escape(str(pattern))
+              expression = expression.replace(r'\*\*', '.*')
+              expression = expression.replace(r'\*', '[^.]*').replace('%', '[^.]')
+              return re.fullmatch(expression, value) is not None
+
+          candidates = all_profiles[
+              all_profiles['DSBD_NAME'].map(lambda pattern: matches(pattern, target))
+          ].copy()
+          if not candidates.empty:
+              candidates['_specificity'] = candidates['DSBD_NAME'].str.replace(
+                  '*', '', regex=False
+              ).str.replace('%', '', regex=False).str.len()
+              best = candidates['_specificity'].max()
+              profiles = candidates[candidates['_specificity'] == best].copy()
+      access = irrdbu00.datasetAccess
+      sysprog = {str(x).upper() for x in sysprog_list} if sysprog_list else None
+
+      def _approved(auth_id):
+          if sysprog is None:
+              return 'UNREVIEWED'
+          return 'YES' if str(auth_id).upper() in sysprog else 'NO'
+
+      findings = []
+      hard_issues = []
+      review_rows = 0
+      unapproved_rows = 0
+
+      if profiles.empty:
+          hard_issues.append('No covering RACF data-set profile was found')
+          findings.append({
+              'DSBD_NAME': target, 'DSBD_UACC': 'MISSING',
+              'DSBD_AUDIT_LEVEL': 'MISSING', 'DSBD_AUDIT_OKQUAL': 'MISSING',
+              'DSACC_AUTH_ID': '', 'AUTH_TYPE': '', 'DSACC_ACCESS': '', 'APPROVED': ''
+          })
+      else:
+          for _, profile in profiles.iterrows():
+              uacc = str(profile['DSBD_UACC']).upper()
+              audit_level = str(profile['DSBD_AUDIT_LEVEL']).upper()
+              audit_qual = str(profile['DSBD_AUDIT_OKQUAL']).upper()
+              uacc_ok = ranks.get(uacc, 99) <= ranks['READ']
+              audit_ok = (
+                  audit_level == 'ALL' and
+                  ranks.get(audit_qual, 99) <= ranks['UPDATE']
+              )
+              if not uacc_ok:
+                  hard_issues.append(f'UACC={uacc} exceeds READ')
+              if not audit_ok:
+                  hard_issues.append(
+                      f'AUDIT={audit_level}({audit_qual or "NONE"}) does not log '
+                      f'all successful and failed UPDATE-or-greater access'
+                  )
+
+              related = access[
+                  (access['DSACC_NAME'] == profile['DSBD_NAME']) &
+                  (
+                      access['DSACC_ACCESS'].map(
+                          lambda value: ranks.get(str(value).upper(), -1)
+                      ) >= ranks['UPDATE']
+                  )
+              ]
+              review_rows += len(related)
+              if related.empty:
+                  findings.append({
+                      'DSBD_NAME': profile['DSBD_NAME'],
+                      'DSBD_UACC': uacc,
+                      'DSBD_AUDIT_LEVEL': audit_level,
+                      'DSBD_AUDIT_OKQUAL': audit_qual,
+                      'DSACC_AUTH_ID': '',
+                      'AUTH_TYPE': '',
+                      'DSACC_ACCESS': '',
+                      'APPROVED': ''
+                  })
+              else:
+                  for _, permit in related.iterrows():
+                      appr = _approved(permit['DSACC_AUTH_ID'])
+                      if appr != 'YES':
+                          unapproved_rows += 1
+                      findings.append({
+                          'DSBD_NAME': profile['DSBD_NAME'],
+                          'DSBD_UACC': uacc,
+                          'DSBD_AUDIT_LEVEL': audit_level,
+                          'DSBD_AUDIT_OKQUAL': audit_qual,
+                          'DSACC_AUTH_ID': permit['DSACC_AUTH_ID'],
+                          'AUTH_TYPE': auth_type(permit['DSACC_AUTH_ID']),
+                          'DSACC_ACCESS': permit['DSACC_ACCESS'],
+                          'APPROVED': appr
+                      })
+
+      hard_issues = sorted(set(hard_issues))
+      if hard_issues:
+          status = 'FAIL'
+          detail = target + ': ' + '; '.join(hard_issues)
+      elif unapproved_rows:
+          status = 'REVIEW'
+          detail = (
+              f'RACF profile settings for {target} meet the technical thresholds; '
+              f'validate {unapproved_rows} permit(s) not in the system-programmer list'
+          )
+      elif review_rows:
+          status = 'PASS'
+          detail = (
+              f'Write access to {target} is limited to {review_rows} approved '
+              'system-programmer permit(s)'
+          )
+      else:
+          status = 'PASS'
+          detail = f'RACF profile settings for {target} meet the technical thresholds'
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: 'Configure Write or greater access to SYS1.SVCLIB to be limited to system programmers only
+    and all WRITE or greater access is logged and reviewed. Evaluate the impact of correcting the deficiency.
+    Develop a plan of action and implement the changes for SYS1.SVCLIB. SYS1.SVCLIB contains SVCs and
+    I/O appendages as such: they are very powerful and will be strictly controlled to avoid compromising
+    system integrity.'
+  source_metadata:
+    vulnerability_id: V-223675
+    rule_id: SV-223675r1137691_rule
+    rule_version: RACF-ES-000270
+    check_id: C-25348r514714_chk
+    fix_id: F-25336r514715_fix
+    cci: CCI-000213
+    documentable: 'false'
+    coverage: HYBRID
+    evidence_note: Profile existence, UACC, and auditing are automated. Explicit access IDs require comparison
+      with approved personnel roles.
+- control_id: STIG-V-223676
+  title: IBM RACF must limit Write or greater access to SYS1.LPALIB to system programmers only.
+  severity: high
+  requirement: |-
+    Discussion:
+    To mitigate the risk of unauthorized access to sensitive information by entities that have been issued certificates by DoD-approved PKIs, all DoD systems (e.g., web servers and web portals) must be properly configured to incorporate access control methods that do not rely solely on the possession of a certificate for access. Successful authentication must not automatically give an entity access to an asset or security boundary. Authorization procedures and controls must be implemented to ensure each authenticated entity also has a validated and current authorization. Authorization is the process of determining whether an entity, once authenticated, is permitted to access a specific asset. Information systems use access control policies and enforcement mechanisms to implement this requirement.
+
+    Satisfies: SRG-OS-000080-GPOS-00048, SRG-OS-000259-GPOS-00100, SRG-OS-000324-GPOS-00125
+
+    Check procedure:
+    Execute a dataset list of access for SYS1.LPALIB.
+
+    If any of the following is true, this is a finding.
+
+    -The ESM data set rules for SYS1.LPALIB do not restrict WRITE or greater access to only z/OS systems programming personnel.
+    -The ESM data set rules for SYS1.LPALIB do not specify that all (i.e., failures and successes) WRITE or greater access will be logged.
+  stig:
+    rule_id: SV-223676r1137691_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-ES-000280
+    reference: V-223676 | SV-223676r1137691_rule | CCI-000213
+  data_sources_needed:
+  - irrdbu00
+  implementation:
+    engine: python
+    dataset: irrdbu00.datasets
+    logic: |
+      import re
+
+      target = 'SYS1.LPALIB'
+      ranks = {'NONE': 0, 'EXECUTE': 1, 'READ': 2, 'UPDATE': 3, 'CONTROL': 4, 'ALTER': 5}
+      user_ids = set(irrdbu00.users['USBD_NAME'].astype(str).str.upper())
+      group_ids = set(irrdbu00.groups['GPBD_NAME'].astype(str).str.upper())
+
+      def auth_type(value):
+          auth_id = str(value).upper()
+          if auth_id in user_ids:
+              return 'USER'
+          if auth_id in group_ids:
+              return 'GROUP'
+          return 'UNRESOLVED'
+
+      all_profiles = irrdbu00.datasets
+      profiles = all_profiles[all_profiles['DSBD_NAME'] == target].copy()
+      if profiles.empty:
+          def matches(pattern, value):
+              expression = re.escape(str(pattern))
+              expression = expression.replace(r'\*\*', '.*')
+              expression = expression.replace(r'\*', '[^.]*').replace('%', '[^.]')
+              return re.fullmatch(expression, value) is not None
+
+          candidates = all_profiles[
+              all_profiles['DSBD_NAME'].map(lambda pattern: matches(pattern, target))
+          ].copy()
+          if not candidates.empty:
+              candidates['_specificity'] = candidates['DSBD_NAME'].str.replace(
+                  '*', '', regex=False
+              ).str.replace('%', '', regex=False).str.len()
+              best = candidates['_specificity'].max()
+              profiles = candidates[candidates['_specificity'] == best].copy()
+      access = irrdbu00.datasetAccess
+      sysprog = {str(x).upper() for x in sysprog_list} if sysprog_list else None
+
+      def _approved(auth_id):
+          if sysprog is None:
+              return 'UNREVIEWED'
+          return 'YES' if str(auth_id).upper() in sysprog else 'NO'
+
+      findings = []
+      hard_issues = []
+      review_rows = 0
+      unapproved_rows = 0
+
+      if profiles.empty:
+          hard_issues.append('No covering RACF data-set profile was found')
+          findings.append({
+              'DSBD_NAME': target, 'DSBD_UACC': 'MISSING',
+              'DSBD_AUDIT_LEVEL': 'MISSING', 'DSBD_AUDIT_OKQUAL': 'MISSING',
+              'DSACC_AUTH_ID': '', 'AUTH_TYPE': '', 'DSACC_ACCESS': '', 'APPROVED': ''
+          })
+      else:
+          for _, profile in profiles.iterrows():
+              uacc = str(profile['DSBD_UACC']).upper()
+              audit_level = str(profile['DSBD_AUDIT_LEVEL']).upper()
+              audit_qual = str(profile['DSBD_AUDIT_OKQUAL']).upper()
+              uacc_ok = ranks.get(uacc, 99) <= ranks['READ']
+              audit_ok = (
+                  audit_level == 'ALL' and
+                  ranks.get(audit_qual, 99) <= ranks['UPDATE']
+              )
+              if not uacc_ok:
+                  hard_issues.append(f'UACC={uacc} exceeds READ')
+              if not audit_ok:
+                  hard_issues.append(
+                      f'AUDIT={audit_level}({audit_qual or "NONE"}) does not log '
+                      f'all successful and failed UPDATE-or-greater access'
+                  )
+
+              related = access[
+                  (access['DSACC_NAME'] == profile['DSBD_NAME']) &
+                  (
+                      access['DSACC_ACCESS'].map(
+                          lambda value: ranks.get(str(value).upper(), -1)
+                      ) >= ranks['UPDATE']
+                  )
+              ]
+              review_rows += len(related)
+              if related.empty:
+                  findings.append({
+                      'DSBD_NAME': profile['DSBD_NAME'],
+                      'DSBD_UACC': uacc,
+                      'DSBD_AUDIT_LEVEL': audit_level,
+                      'DSBD_AUDIT_OKQUAL': audit_qual,
+                      'DSACC_AUTH_ID': '',
+                      'AUTH_TYPE': '',
+                      'DSACC_ACCESS': '',
+                      'APPROVED': ''
+                  })
+              else:
+                  for _, permit in related.iterrows():
+                      appr = _approved(permit['DSACC_AUTH_ID'])
+                      if appr != 'YES':
+                          unapproved_rows += 1
+                      findings.append({
+                          'DSBD_NAME': profile['DSBD_NAME'],
+                          'DSBD_UACC': uacc,
+                          'DSBD_AUDIT_LEVEL': audit_level,
+                          'DSBD_AUDIT_OKQUAL': audit_qual,
+                          'DSACC_AUTH_ID': permit['DSACC_AUTH_ID'],
+                          'AUTH_TYPE': auth_type(permit['DSACC_AUTH_ID']),
+                          'DSACC_ACCESS': permit['DSACC_ACCESS'],
+                          'APPROVED': appr
+                      })
+
+      hard_issues = sorted(set(hard_issues))
+      if hard_issues:
+          status = 'FAIL'
+          detail = target + ': ' + '; '.join(hard_issues)
+      elif unapproved_rows:
+          status = 'REVIEW'
+          detail = (
+              f'RACF profile settings for {target} meet the technical thresholds; '
+              f'validate {unapproved_rows} permit(s) not in the system-programmer list'
+          )
+      elif review_rows:
+          status = 'PASS'
+          detail = (
+              f'Write access to {target} is limited to {review_rows} approved '
+              'system-programmer permit(s)'
+          )
+      else:
+          status = 'PASS'
+          detail = f'RACF profile settings for {target} meet the technical thresholds'
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    Review access authorization to critical system files. Evaluate the impact of correcting the deficiency. Develop a plan of action and implement the changes required to protect SYS1.LPALIB.
+
+    Configure WRITE or greater access to SYS1.LPALIB to be limited to system programmers only and all WRITE or greater access is logged.
+  source_metadata:
+    vulnerability_id: V-223676
+    rule_id: SV-223676r1137691_rule
+    rule_version: RACF-ES-000280
+    check_id: C-25349r514717_chk
+    fix_id: F-25337r514718_fix
+    cci: CCI-000213
+    documentable: 'false'
+    coverage: HYBRID
+    evidence_note: Profile existence, UACC, and auditing are automated. Explicit access IDs require comparison
+      with approved personnel roles.
+- control_id: STIG-V-223677
+  title: IBM z/OS libraries included in the system REXXLIB concatenation must be properly protected.
+  severity: high
+  requirement: |-
+    Discussion:
+    Access control policies include: identity-based policies, role-based policies, and attribute-based policies. Access enforcement mechanisms include: access control lists, access control matrices, and cryptography. These policies and mechanisms must be employed by the application to control access between users (or processes acting on behalf of users) and objects (e.g., devices, files, records, processes, programs, and domains) in the information system.
+
+    Satisfies: SRG-OS-000080-GPOS-00048, SRG-OS-000259-GPOS-00100, SRG-OS-000324-GPOS-00125
+
+    Check procedure:
+    Refer to AXRxx member of PARMLIB, for each REXXLIB ADD statement:
+
+    If the ESM data set rules for libraries in the REXXLIB concatenation restrict WRITE or greater access to only z/OS systems programming personnel, this is not a finding.
+
+    If ESM dataset rules for libraries in the REXXLIB concatenation restrict GLOBAL read access, this is not a finding.
+
+    If ESM data set rules for libraries in the REXXLIB concatenating restrict WRITE or Greater access to z/OS system Programmers, this is not a finding.
+
+    If the ESM data set rules for libraries in the REXXLIB concatenation restrict READ access to the following, this is not a finding.
+
+    -Appropriate Started Tasks
+    -Auditors
+    -User-id defined in PARMLIB member AXR00 AXRUSER(user-id)
+
+    If the ESM data set rules for libraries in the REXXLIB concatenation specify that all (i.e., failures and successes) WRITE or greater access will be logged, this is not a finding.
+  stig:
+    rule_id: SV-223677r1137691_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-ES-000290
+    reference: V-223677 | SV-223677r1137691_rule | CCI-000213
+  data_sources_needed: []
+  implementation:
+    engine: python
+    dataset: ''
+    logic: |
+      status = 'REVIEW'
+      detail = 'Additional evidence required for V-223677: Collect every REXXLIB data set and AXRUSER from active AXRxx PARMLIB members, then evaluate their RACF profiles and role-approved access.'
+      findings = []
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    Evaluate the impact of correcting the deficiency. Develop a plan of action and implement the changes required to protect APF Authorized Libraries.
+
+    Configure ESM dataset rules to limit WRITE or greater access to libraries included in the system REXXLIB concatenation to system programmers only.
+
+    Configure ESM dataset rules allow READ access to only appropriate Started Tasks and Auditors.
+
+    Configure ESM dataset rules to log UPDATE and/or ALTER access (i.e., successes and failures).
+  source_metadata:
+    vulnerability_id: V-223677
+    rule_id: SV-223677r1137691_rule
+    rule_version: RACF-ES-000290
+    check_id: C-25350r767079_chk
+    fix_id: F-25338r767080_fix
+    cci: CCI-000213
+    documentable: 'false'
+    coverage: MANUAL
+    evidence_note: Collect every REXXLIB data set and AXRUSER from active AXRxx PARMLIB members, then
+      evaluate their RACF profiles and role-approved access.
+- control_id: STIG-V-223678
+  title: IBM RACF must limit write or greater access to all LPA libraries to system programmers only.
+  severity: high
+  requirement: |-
+    Discussion:
+    To mitigate the risk of unauthorized access to sensitive information by entities that have been issued certificates by DoD-approved PKIs, all DoD systems (e.g., web servers and web portals) must be properly configured to incorporate access control methods that do not rely solely on the possession of a certificate for access. Successful authentication must not automatically give an entity access to an asset or security boundary. Authorization procedures and controls must be implemented to ensure each authenticated entity also has a validated and current authorization. Authorization is the process of determining whether an entity, once authenticated, is permitted to access a specific asset. Information systems use access control policies and enforcement mechanisms to implement this requirement.
+
+    Satisfies: SRG-OS-000080-GPOS-00048, SRG-OS-000259-GPOS-00100, SRG-OS-000324-GPOS-00125
+
+    Check procedure:
+    From Any ISPF input line, enter:
+    TSO ISRDDN LPA.
+
+    If any of the following is true, this is a finding.
+
+    -The ACP data set rules for LPA libraries do not restrict WRITE or greater access to only z/OS systems programming personnel.
+    -The ACP data set rules for LPA libraries do not specify that all (i.e., failures and successes) WRITE or greater access will be logged.
+  stig:
+    rule_id: SV-223678r1137691_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-ES-000300
+    reference: V-223678 | SV-223678r1137691_rule | CCI-000213
+  data_sources_needed:
+  - irrdbu00
+  - lpa_list
+  implementation:
+    engine: python
+    dataset: irrdbu00.datasets
+    logic: |
+      import re
+
+      libraries = lpa_list
+      ranks = {'NONE': 0, 'EXECUTE': 1, 'READ': 2, 'UPDATE': 3, 'CONTROL': 4, 'ALTER': 5}
+      audit_required = True
+      required_audit_threshold = 'UPDATE'
+      user_ids = set(irrdbu00.users['USBD_NAME'].astype(str).str.upper())
+      group_ids = set(irrdbu00.groups['GPBD_NAME'].astype(str).str.upper())
+      all_profiles = irrdbu00.datasets
+      all_access = irrdbu00.datasetAccess
+
+      def auth_type(value):
+          auth_id = str(value).upper()
+          if auth_id in user_ids:
+              return 'USER'
+          if auth_id in group_ids:
+              return 'GROUP'
+          return 'UNRESOLVED'
+
+      def matches(pattern, value):
+          expression = re.escape(str(pattern))
+          expression = expression.replace(r'\*\*', '.*')
+          expression = expression.replace(r'\*', '[^.]*').replace('%', '[^.]')
+          return re.fullmatch(expression, value) is not None
+
+      hard_issues = []
+      review_access = {}
+      for library in libraries:
+          profiles = all_profiles[all_profiles['DSBD_NAME'] == library].copy()
+          if profiles.empty:
+              candidates = all_profiles[
+                  all_profiles['DSBD_NAME'].map(
+                      lambda pattern: matches(pattern, library)
+                  )
+              ].copy()
+              if not candidates.empty:
+                  candidates['_specificity'] = candidates['DSBD_NAME'].str.replace(
+                      '*', '', regex=False
+                  ).str.replace('%', '', regex=False).str.len()
+                  best = candidates['_specificity'].max()
+                  profiles = candidates[candidates['_specificity'] == best].copy()
+
+          if profiles.empty:
+              hard_issues.append(f'{library}: no covering RACF profile')
+              continue
+
+          for _, profile in profiles.iterrows():
+              uacc = str(profile['DSBD_UACC']).upper()
+              level = str(profile['DSBD_AUDIT_LEVEL']).upper()
+              okqual = str(profile['DSBD_AUDIT_OKQUAL']).upper()
+              if ranks.get(uacc, 99) > ranks['READ']:
+                  hard_issues.append(f'{library}: UACC={uacc}')
+              if audit_required and not (
+                  level == 'ALL' and
+                  ranks.get(okqual, 99) <= ranks[required_audit_threshold]
+              ):
+                  hard_issues.append(
+                      f'{library}: AUDIT={level}({okqual or "NONE"})'
+                  )
+
+              related = all_access[
+                  (all_access['DSACC_NAME'] == profile['DSBD_NAME']) &
+                  (
+                      all_access['DSACC_ACCESS'].map(
+                          lambda value: ranks.get(str(value).upper(), -1)
+                      ) >= ranks['UPDATE']
+                  )
+              ]
+              for _, permit in related.iterrows():
+                  auth_id = str(permit['DSACC_AUTH_ID']).upper()
+                  access = str(permit['DSACC_ACCESS']).upper()
+                  item = review_access.setdefault(auth_id, {
+                      'auth_type': auth_type(auth_id),
+                      'max_access': access,
+                      'libraries': set(),
+                  })
+                  if ranks.get(access, -1) > ranks.get(item['max_access'], -1):
+                      item['max_access'] = access
+                  item['libraries'].add(library)
+
+      sysprog = {str(x).upper() for x in sysprog_list} if sysprog_list else None
+
+      def _approved(auth_id):
+          if sysprog is None:
+              return 'UNREVIEWED'
+          return 'YES' if str(auth_id).upper() in sysprog else 'NO'
+
+      findings = [
+          {
+              'AUTH_ID': auth_id,
+              'AUTH_TYPE': item['auth_type'],
+              'MAX_ACCESS': item['max_access'],
+              'LIBRARY_COUNT': len(item['libraries']),
+              'LIBRARIES': ', '.join(sorted(item['libraries'])),
+              'APPROVED': _approved(auth_id),
+          }
+          for auth_id, item in sorted(review_access.items())
+      ]
+      unapproved = [f for f in findings if f['APPROVED'] != 'YES']
+
+      hard_issues = sorted(set(hard_issues))
+      if hard_issues:
+          status = 'FAIL'
+          detail = (
+              f'{len(hard_issues)} LPA library protection issue(s): ' +
+              '; '.join(hard_issues[:10]) +
+              ('; ...' if len(hard_issues) > 10 else '') +
+              f'; {len(unapproved)} unique UPDATE-or-greater '
+              'user/group ID(s) require validation'
+          )
+      elif unapproved:
+          status = 'REVIEW'
+          detail = (
+              f'LPA library profile settings meet technical thresholds; validate '
+              f'{len(unapproved)} unique UPDATE-or-greater '
+              'user/group ID(s) not in the system-programmer list'
+          )
+      elif findings:
+          status = 'PASS'
+          detail = (
+              f'LPA library write access is limited to {len(findings)} approved '
+              'system-programmer ID(s)'
+          )
+      else:
+          status = 'PASS'
+          detail = f'All {len(libraries)} LPA library entries meet the technical thresholds'
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    Review access authorization to critical system files. Evaluate the impact of correcting the deficiency. Develop a plan of action and implement the changes required to protect LPA Libraries.
+
+    Configure the WRITE or greater access to all LPA libraries to be limited to system programmers only and all WRITE or greater access is logged.
+  source_metadata:
+    vulnerability_id: V-223678
+    rule_id: SV-223678r1137691_rule
+    rule_version: RACF-ES-000300
+    check_id: C-25351r514723_chk
+    fix_id: F-25339r514724_fix
+    cci: CCI-000213
+    documentable: 'false'
+    coverage: HYBRID
+    evidence_note: The runtime lpa list (inventory 'lpa' / --lpa-list) supplies the active LPA concatenation.
+      Profile coverage, UACC, and auditing are automated; unique UPDATE-or-greater user/group IDs are
+      returned for role validation.
+- control_id: STIG-V-223679
+  title: IBM RACF must limit Write or greater access to libraries containing EXIT modules to system programmers
+    only.
+  severity: high
+  requirement: |-
+    Discussion:
+    To mitigate the risk of unauthorized access to sensitive information by entities that have been issued certificates by DoD-approved PKIs, all DoD systems (e.g., web servers and web portals) must be properly configured to incorporate access control methods that do not rely solely on the possession of a certificate for access. Successful authentication must not automatically give an entity access to an asset or security boundary. Authorization procedures and controls must be implemented to ensure each authenticated entity also has a validated and current authorization. Authorization is the process of determining whether an entity, once authenticated, is permitted to access a specific asset. Information systems use access control policies and enforcement mechanisms to implement this requirement.
+
+    Satisfies: SRG-OS-000080-GPOS-00048, SRG-OS-000259-GPOS-00100, SRG-OS-000324-GPOS-00125
+
+    Check procedure:
+    Examine the system for active exit modules. The system administrator may have to help for this. Third-party software products can determine standard and dynamic exits loaded in the system.
+
+    If all the exits are found within APF, LPA, and LINKLIST, this is Not Applicable.
+
+    If ESM data set rules for libraries that contain system exit modules restrict WRITE or greater access to only z/OS systems programming personnel, this is not a finding.
+
+    If the ESM data set rules for libraries that contain exit modules specify that all WRITE or greater access will be logged, this is not a finding.
+  stig:
+    rule_id: SV-223679r1137691_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-ES-000310
+    reference: V-223679 | SV-223679r1137691_rule | CCI-000213
+  data_sources_needed: []
+  implementation:
+    engine: python
+    dataset: ''
+    logic: |
+      status = 'REVIEW'
+      detail = 'Additional evidence required for V-223679: Collect active static and dynamic exits with their load-library data sets (for example system exit displays plus module-to-library inventory).'
+      findings = []
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    Using the ESM, protect the data sets associated with all product exits installed in the z/OS environment. This reduces the potential of a hacker adding a routine to a library and possibly creating an exposure. Confirm that all exits are tracked using a CMP. Develop usermods to include the source/object code used to support the exits. Have systems programming personnel review all z/OS and other product exits to confirm that the exits are required and are correctly installed.
+
+    Configure ESM Dataset rules for all WRITE or greater access to libraries containing z/OS and other system-level exits will be logged using the ACP's facilities. Only systems programming personnel will be authorized to update the libraries containing z/OS and other system-level exits.
+  source_metadata:
+    vulnerability_id: V-223679
+    rule_id: SV-223679r1137691_rule
+    rule_version: RACF-ES-000310
+    check_id: C-25352r868809_chk
+    fix_id: F-25340r868810_fix
+    cci: CCI-000213
+    documentable: 'false'
+    coverage: MANUAL
+    evidence_note: Collect active static and dynamic exits with their load-library data sets (for example
+      system exit displays plus module-to-library inventory).
+- control_id: STIG-V-223682
+  title: IBM RACF must limit WRITE or greater access to all APF-authorized libraries to system programmers
+    only.
+  severity: high
+  requirement: |-
+    Discussion:
+    To mitigate the risk of unauthorized access to sensitive information by entities that have been issued certificates by DoD-approved PKIs, all DoD systems (e.g., web servers and web portals) must be properly configured to incorporate access control methods that do not rely solely on the possession of a certificate for access. Successful authentication must not automatically give an entity access to an asset or security boundary. Authorization procedures and controls must be implemented to ensure each authenticated entity also has a validated and current authorization. Authorization is the process of determining whether an entity, once authenticated, is permitted to access a specific asset. Information systems use access control policies and enforcement mechanisms to implement this requirement.
+
+    Access control policies include: identity-based policies, role-based policies, and attribute-based policies. Access enforcement mechanisms include: access control lists, access control matrices, and cryptography. These policies and mechanisms must be employed by the application to control access between users (or processes acting on behalf of users) and objects (e.g., devices, files, records, processes, programs, and domains) in the information system.
+
+    Satisfies: SRG-OS-000080-GPOS-00048, SRG-OS-000259-GPOS-00100, SRG-OS-000324-GPOS-00125, SRG-OS-000324-GPOS-00125
+
+    Check procedure:
+    From Any ISPF input line, enter TSO ISRDDN APF.
+
+    If all of the following are untrue, this is not a finding.
+
+    If any of the following are true, this is a finding.
+
+    -The ACP data set rules for APF libraries do not restrict WRITE or greater access to only z/OS systems programming personnel.
+    -The ACP data set rules for APF libraries do not specify that all (i.e., failures and successes) WRITE or greater access will be logged.
+  stig:
+    rule_id: SV-223682r1137691_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-ES-000340
+    reference: V-223682 | SV-223682r1137691_rule | CCI-000213
+  data_sources_needed:
+  - irrdbu00
+  - apf_list
+  implementation:
+    engine: python
+    dataset: irrdbu00.datasets
+    logic: |
+      import re
+
+      libraries = apf_list
+      ranks = {'NONE': 0, 'EXECUTE': 1, 'READ': 2, 'UPDATE': 3, 'CONTROL': 4, 'ALTER': 5}
+      audit_required = True
+      required_audit_threshold = 'UPDATE'
+      user_ids = set(irrdbu00.users['USBD_NAME'].astype(str).str.upper())
+      group_ids = set(irrdbu00.groups['GPBD_NAME'].astype(str).str.upper())
+      all_profiles = irrdbu00.datasets
+      all_access = irrdbu00.datasetAccess
+
+      def auth_type(value):
+          auth_id = str(value).upper()
+          if auth_id in user_ids:
+              return 'USER'
+          if auth_id in group_ids:
+              return 'GROUP'
+          return 'UNRESOLVED'
+
+      def matches(pattern, value):
+          expression = re.escape(str(pattern))
+          expression = expression.replace(r'\*\*', '.*')
+          expression = expression.replace(r'\*', '[^.]*').replace('%', '[^.]')
+          return re.fullmatch(expression, value) is not None
+
+      hard_issues = []
+      review_access = {}
+      for library in libraries:
+          profiles = all_profiles[all_profiles['DSBD_NAME'] == library].copy()
+          if profiles.empty:
+              candidates = all_profiles[
+                  all_profiles['DSBD_NAME'].map(
+                      lambda pattern: matches(pattern, library)
+                  )
+              ].copy()
+              if not candidates.empty:
+                  candidates['_specificity'] = candidates['DSBD_NAME'].str.replace(
+                      '*', '', regex=False
+                  ).str.replace('%', '', regex=False).str.len()
+                  best = candidates['_specificity'].max()
+                  profiles = candidates[candidates['_specificity'] == best].copy()
+
+          if profiles.empty:
+              hard_issues.append(f'{library}: no covering RACF profile')
+              continue
+
+          for _, profile in profiles.iterrows():
+              uacc = str(profile['DSBD_UACC']).upper()
+              level = str(profile['DSBD_AUDIT_LEVEL']).upper()
+              okqual = str(profile['DSBD_AUDIT_OKQUAL']).upper()
+              if ranks.get(uacc, 99) > ranks['READ']:
+                  hard_issues.append(f'{library}: UACC={uacc}')
+              if audit_required and not (
+                  level == 'ALL' and
+                  ranks.get(okqual, 99) <= ranks[required_audit_threshold]
+              ):
+                  hard_issues.append(
+                      f'{library}: AUDIT={level}({okqual or "NONE"})'
+                  )
+
+              related = all_access[
+                  (all_access['DSACC_NAME'] == profile['DSBD_NAME']) &
+                  (
+                      all_access['DSACC_ACCESS'].map(
+                          lambda value: ranks.get(str(value).upper(), -1)
+                      ) >= ranks['UPDATE']
+                  )
+              ]
+              for _, permit in related.iterrows():
+                  auth_id = str(permit['DSACC_AUTH_ID']).upper()
+                  access = str(permit['DSACC_ACCESS']).upper()
+                  item = review_access.setdefault(auth_id, {
+                      'auth_type': auth_type(auth_id),
+                      'max_access': access,
+                      'libraries': set(),
+                  })
+                  if ranks.get(access, -1) > ranks.get(item['max_access'], -1):
+                      item['max_access'] = access
+                  item['libraries'].add(library)
+
+      sysprog = {str(x).upper() for x in sysprog_list} if sysprog_list else None
+
+      def _approved(auth_id):
+          if sysprog is None:
+              return 'UNREVIEWED'
+          return 'YES' if str(auth_id).upper() in sysprog else 'NO'
+
+      findings = [
+          {
+              'AUTH_ID': auth_id,
+              'AUTH_TYPE': item['auth_type'],
+              'MAX_ACCESS': item['max_access'],
+              'LIBRARY_COUNT': len(item['libraries']),
+              'LIBRARIES': ', '.join(sorted(item['libraries'])),
+              'APPROVED': _approved(auth_id),
+          }
+          for auth_id, item in sorted(review_access.items())
+      ]
+      unapproved = [f for f in findings if f['APPROVED'] != 'YES']
+
+      hard_issues = sorted(set(hard_issues))
+      if hard_issues:
+          status = 'FAIL'
+          detail = (
+              f'{len(hard_issues)} APF library protection issue(s): ' +
+              '; '.join(hard_issues[:10]) +
+              ('; ...' if len(hard_issues) > 10 else '') +
+              f'; {len(unapproved)} unique UPDATE-or-greater '
+              'user/group ID(s) require validation'
+          )
+      elif unapproved:
+          status = 'REVIEW'
+          detail = (
+              f'APF library profile settings meet technical thresholds; validate '
+              f'{len(unapproved)} unique UPDATE-or-greater '
+              'user/group ID(s) not in the system-programmer list'
+          )
+      elif findings:
+          status = 'PASS'
+          detail = (
+              f'APF library write access is limited to {len(findings)} approved '
+              'system-programmer ID(s)'
+          )
+      else:
+          status = 'PASS'
+          detail = f'All {len(libraries)} APF library entries meet the technical thresholds'
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    Review access authorization to critical system files. Evaluate the impact of correcting the deficiency. Develop a plan of action and implement the changes required to protect APF Authorized Libraries.
+
+    Configure, WRITE, or greater access to all APF-authorized libraries to be limited to system programmers only and all WRITE or greater access is logged.
+  source_metadata:
+    vulnerability_id: V-223682
+    rule_id: SV-223682r1137691_rule
+    rule_version: RACF-ES-000340
+    check_id: C-25355r514735_chk
+    fix_id: F-25343r514736_fix
+    cci: CCI-000213
+    documentable: 'false'
+    coverage: HYBRID
+    evidence_note: The runtime --apf-list supplies active APF libraries. Profile coverage, UACC, and auditing
+      are automated; unique UPDATE-or-greater user/group IDs are returned for role validation.
+- control_id: STIG-V-223684
+  title: The IBM RACF System REXX IRRPWREX security data set must be properly protected.
+  severity: high
+  requirement: |-
+    Discussion:
+    To mitigate the risk of unauthorized access to sensitive information by entities that have been issued certificates by DoD-approved PKIs, all DoD systems (e.g., web servers and web portals) must be properly configured to incorporate access control methods that do not rely solely on the possession of a certificate for access. Successful authentication must not automatically give an entity access to an asset or security boundary. Authorization procedures and controls must be implemented to ensure each authenticated entity also has a validated and current authorization. Authorization is the process of determining whether an entity, once authenticated, is permitted to access a specific asset. Information systems use access control policies and enforcement mechanisms to implement this requirement.
+
+    Security functions are the hardware, software, and/or firmware of the information system responsible for enforcing the system security policy and supporting the isolation of code and data on which the protection is based. Operating systems implement code separation (i.e., separation of security functions from nonsecurity functions) in a number of ways, including through the provision of security kernels via processor rings or processor modes. For non-kernel code, security function isolation is often achieved through file system protections that serve to protect the code on disk and address space protections that protect executing code.
+
+    Developers and implementers can increase the assurance in security functions by employing well-defined security policy models; structured, disciplined, and rigorous hardware and software development techniques; and sound system/security engineering principles. Implementation may include isolation of memory space and libraries. Operating systems restrict access to security functions through the use of access control mechanisms and by implementing least privilege capabilities.
+
+    Satisfies: SRG-OS-000080-GPOS-00048, SRG-OS-000134-GPOS-00068, SRG-OS-000259-GPOS-00100
+
+    Check procedure:
+    Refer to the zOS system REXXLIB concatenation found in SYS1. PARMLIB (AXR) for the data set that contains the REXX for Password exit named IRRPWREX and the defined AXRUSER.
+
+    If the following guidance is true, this is not a finding.
+
+    -RACF data set access authorizations restrict READ to AXRUSER, z/OS systems programming personnel, security personnel, and auditors.
+    -RACF data set access authorizations restrict UPDATE to security personnel using a documented change management procedure to provide a mechanism for access and revoking of access after use.
+    -All (i.e., failures and successes) data set access authorities (i.e., READ, UPDATE, and CONTROL) is logged.
+    -RACF data set access authorizations specify UACC(NONE) and NOWARNING.
+  stig:
+    rule_id: SV-223684r1137691_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-ES-000360
+    reference: V-223684 | SV-223684r1137691_rule | CCI-000213
+  data_sources_needed: []
+  implementation:
+    engine: python
+    dataset: ''
+    logic: |
+      status = 'REVIEW'
+      detail = 'Additional evidence required for V-223684: Collect active AXRxx members, the IRRPWREX library, AXRUSER, and the approved security-personnel/change-management authorization list.'
+      findings = []
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    Configure read access to be restricted to security administrators, systems programmers, and auditors.
+
+    Establish a procedure documented with the ISSM that defines a change management process to provide mechanism for granting Update access to security administrators on an exception basis. The process should contain procedures to revoke access when documented update is completed.
+
+    Configure all failures and successes data set access authorities for RACF data set that contains the Password exit to be logged.
+
+    Examples:
+    ad 'sys3.racf.rexxlib.**' uacc(none) owner(sys3) -
+    audit(all(read))
+    Permit 'sys3.racf.rexxlib.**' id(<syspsmpl> <secasmpl> <smplsmpl> AXRUSER) acc(r)
+    Permit 'sys3.racf.rexxlib.**' id(<secasmpl>) acc(u)
+  source_metadata:
+    vulnerability_id: V-223684
+    rule_id: SV-223684r1137691_rule
+    rule_version: RACF-ES-000360
+    check_id: C-25357r514741_chk
+    fix_id: F-25345r767104_fix
+    cci: CCI-000213
+    documentable: 'false'
+    coverage: MANUAL
+    evidence_note: Collect active AXRxx members, the IRRPWREX library, AXRUSER, and the approved security-personnel/change-management
+      authorization list.
+- control_id: STIG-V-223685
+  title: IBM RACF security data sets and/or databases must be properly protected.
+  severity: high
+  requirement: |-
+    Discussion:
+    The External Security Manager (ESM) database files contain all access control information for the operating system environment and system resources. Unauthorized access could result in the compromise of the operating system environment, ACP, and customer data.
+
+    Satisfies: SRG-OS-000080-GPOS-00048, SRG-OS-000134-GPOS-00068, SRG-OS-000259-GPOS-00100, SRG-OS-000324-GPOS-00125
+
+    Check procedure:
+    If the following accesses to the ESM security data sets and/or databases are properly restricted as detailed below, this is not a finding.
+
+    -The ESM data set rules for ESM security data sets and/or databases restrict READ access to auditors and DASD batch.
+    -The ESM data set rules for ESM security data sets and/or databases restrict READ and/or greater access to z/OS systems programming personnel, security personnel, and/or batch jobs that perform ESM maintenance.
+
+    All (i.e., failures and successes) data set access authorities (i.e., READ, UPDATE, ALTER, and CONTROL) for ESM security data sets and/or databases are logged.
+  stig:
+    rule_id: SV-223685r1137691_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-ES-000370
+    reference: V-223685 | SV-223685r1137691_rule | CCI-000213
+  data_sources_needed:
+  - irrdbu00
+  - racfdb_list
+  implementation:
+    engine: python
+    dataset: irrdbu00.datasets
+    logic: |
+      import re
+
+      libraries = racfdb_list
+      ranks = {'NONE': 0, 'EXECUTE': 1, 'READ': 2, 'UPDATE': 3, 'CONTROL': 4, 'ALTER': 5}
+      audit_required = True
+      required_audit_threshold = 'READ'
+      user_ids = set(irrdbu00.users['USBD_NAME'].astype(str).str.upper())
+      group_ids = set(irrdbu00.groups['GPBD_NAME'].astype(str).str.upper())
+      all_profiles = irrdbu00.datasets
+      all_access = irrdbu00.datasetAccess
+
+      def auth_type(value):
+          auth_id = str(value).upper()
+          if auth_id in user_ids:
+              return 'USER'
+          if auth_id in group_ids:
+              return 'GROUP'
+          return 'UNRESOLVED'
+
+      def matches(pattern, value):
+          expression = re.escape(str(pattern))
+          expression = expression.replace(r'\*\*', '.*')
+          expression = expression.replace(r'\*', '[^.]*').replace('%', '[^.]')
+          return re.fullmatch(expression, value) is not None
+
+      hard_issues = []
+      review_access = {}
+      for library in libraries:
+          profiles = all_profiles[all_profiles['DSBD_NAME'] == library].copy()
+          if profiles.empty:
+              candidates = all_profiles[
+                  all_profiles['DSBD_NAME'].map(
+                      lambda pattern: matches(pattern, library)
+                  )
+              ].copy()
+              if not candidates.empty:
+                  candidates['_specificity'] = candidates['DSBD_NAME'].str.replace(
+                      '*', '', regex=False
+                  ).str.replace('%', '', regex=False).str.len()
+                  best = candidates['_specificity'].max()
+                  profiles = candidates[candidates['_specificity'] == best].copy()
+
+          if profiles.empty:
+              hard_issues.append(f'{library}: no covering RACF profile')
+              continue
+
+          for _, profile in profiles.iterrows():
+              uacc = str(profile['DSBD_UACC']).upper()
+              level = str(profile['DSBD_AUDIT_LEVEL']).upper()
+              okqual = str(profile['DSBD_AUDIT_OKQUAL']).upper()
+              if ranks.get(uacc, 99) > ranks['NONE']:
+                  hard_issues.append(f'{library}: UACC={uacc}')
+              if audit_required and not (
+                  level == 'ALL' and
+                  ranks.get(okqual, 99) <= ranks[required_audit_threshold]
+              ):
+                  hard_issues.append(
+                      f'{library}: AUDIT={level}({okqual or "NONE"})'
+                  )
+
+              related = all_access[
+                  (all_access['DSACC_NAME'] == profile['DSBD_NAME']) &
+                  (
+                      all_access['DSACC_ACCESS'].map(
+                          lambda value: ranks.get(str(value).upper(), -1)
+                      ) >= ranks['READ']
+                  )
+              ]
+              for _, permit in related.iterrows():
+                  auth_id = str(permit['DSACC_AUTH_ID']).upper()
+                  access = str(permit['DSACC_ACCESS']).upper()
+                  item = review_access.setdefault(auth_id, {
+                      'auth_type': auth_type(auth_id),
+                      'max_access': access,
+                      'libraries': set(),
+                  })
+                  if ranks.get(access, -1) > ranks.get(item['max_access'], -1):
+                      item['max_access'] = access
+                  item['libraries'].add(library)
+
+      sysprog = {str(x).upper() for x in sysprog_list} if sysprog_list else None
+
+      def _approved(auth_id):
+          if sysprog is None:
+              return 'UNREVIEWED'
+          return 'YES' if str(auth_id).upper() in sysprog else 'NO'
+
+      findings = [
+          {
+              'AUTH_ID': auth_id,
+              'AUTH_TYPE': item['auth_type'],
+              'MAX_ACCESS': item['max_access'],
+              'LIBRARY_COUNT': len(item['libraries']),
+              'LIBRARIES': ', '.join(sorted(item['libraries'])),
+              'APPROVED': _approved(auth_id),
+          }
+          for auth_id, item in sorted(review_access.items())
+      ]
+      unapproved = [f for f in findings if f['APPROVED'] != 'YES']
+
+      hard_issues = sorted(set(hard_issues))
+      if hard_issues:
+          status = 'FAIL'
+          detail = (
+              f'{len(hard_issues)} RACF database protection issue(s): ' +
+              '; '.join(hard_issues[:10]) +
+              ('; ...' if len(hard_issues) > 10 else '') +
+              f'; {len(unapproved)} unique READ-or-greater '
+              'user/group ID(s) require validation'
+          )
+      elif unapproved:
+          status = 'REVIEW'
+          detail = (
+              f'RACF database profile settings meet technical thresholds; validate '
+              f'{len(unapproved)} unique READ-or-greater '
+              'user/group ID(s) not in the system-programmer list'
+          )
+      elif findings:
+          status = 'PASS'
+          detail = (
+              f'RACF database write access is limited to {len(findings)} approved '
+              'system-programmer ID(s)'
+          )
+      else:
+          status = 'PASS'
+          detail = f'All {len(libraries)} RACF database entries meet the technical thresholds'
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    Review access authorization to critical security database files. Evaluate the impact of correcting the deficiency. Develop a plan of action and implement the changes required to protect the ESM files.
+
+    Configure READ and/or greater access to all ESM files and/or databases are limited to system programmers and/or security personnel, and/or batch jobs that perform ESM maintenance. READ access can be given to auditors and DASD batch. All accesses to ESM files and/or databases are logged.
+  source_metadata:
+    vulnerability_id: V-223685
+    rule_id: SV-223685r1137691_rule
+    rule_version: RACF-ES-000370
+    check_id: C-25358r514744_chk
+    fix_id: F-25346r514745_fix
+    cci: CCI-000213
+    documentable: 'false'
+    coverage: HYBRID
+    evidence_note: The runtime RACF database list (inventory 'racf_db') supplies the primary/backup RACF
+      database data sets. Profile coverage, UACC(NONE), and READ-or-greater auditing are automated; unique
+      READ-or-greater user/group IDs are returned for role validation.
+- control_id: STIG-V-223687
+  title: IBM RACF must limit all system PROCLIB data sets to system programmers only.
+  severity: high
+  requirement: |-
+    Discussion:
+    To mitigate the risk of unauthorized access to sensitive information by entities that have been issued certificates by DoD-approved PKIs, all DoD systems (e.g., web servers and web portals) must be properly configured to incorporate access control methods that do not rely solely on the possession of a certificate for access. Successful authentication must not automatically give an entity access to an asset or security boundary. Authorization procedures and controls must be implemented to ensure each authenticated entity also has a validated and current authorization. Authorization is the process of determining whether an entity, once authenticated, is permitted to access a specific asset. Information systems use access control policies and enforcement mechanisms to implement this requirement.
+
+    Access control policies include: identity-based policies, role-based policies, and attribute-based policies. Access enforcement mechanisms include: access control lists, access control matrices, and cryptography. These policies and mechanisms must be employed by the application to control access between users (or processes acting on behalf of users) and objects (e.g., devices, files, records, processes, programs, and domains) in the information system.
+
+    Satisfies: SRG-OS-000080-GPOS-00048, SRG-OS-000324-GPOS-00125
+
+    Check procedure:
+    Refer to the following for the PROCLIB data sets that contain the STCs and TSO logons from the following sources:
+
+    - MSTJCLxx member used during an IPL. The PROCLIB data sets are obtained from the IEFPDSI and IEFJOBS DD statements.
+
+    - PROCxx DD statements and JES2 Dynamic PROCLIBs where 'xx' is the PROCLIB entries for the STC and TSU JOBCLASS configuration definitions.
+
+    Verify the accesses to the above PROCLIB data sets are properly restricted.
+
+    If the following guidance is true, this is not a finding.
+
+    If the ESM data set access authorizations restrict READ access to all authorized users, this is not a finding.
+
+    If the ESM data set access authorizations restrict WRITE and/or greater access to systems programming personnel, this is not a finding.
+  stig:
+    rule_id: SV-223687r1137691_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-ES-000390
+    reference: V-223687 | SV-223687r1137691_rule | CCI-000213
+  data_sources_needed:
+  - irrdbu00
+  - proclib_list
+  implementation:
+    engine: python
+    dataset: irrdbu00.datasets
+    logic: |
+      import re
+
+      libraries = proclib_list
+      ranks = {'NONE': 0, 'EXECUTE': 1, 'READ': 2, 'UPDATE': 3, 'CONTROL': 4, 'ALTER': 5}
+      audit_required = False
+      required_audit_threshold = 'NONE'
+      user_ids = set(irrdbu00.users['USBD_NAME'].astype(str).str.upper())
+      group_ids = set(irrdbu00.groups['GPBD_NAME'].astype(str).str.upper())
+      all_profiles = irrdbu00.datasets
+      all_access = irrdbu00.datasetAccess
+
+      def auth_type(value):
+          auth_id = str(value).upper()
+          if auth_id in user_ids:
+              return 'USER'
+          if auth_id in group_ids:
+              return 'GROUP'
+          return 'UNRESOLVED'
+
+      def matches(pattern, value):
+          expression = re.escape(str(pattern))
+          expression = expression.replace(r'\*\*', '.*')
+          expression = expression.replace(r'\*', '[^.]*').replace('%', '[^.]')
+          return re.fullmatch(expression, value) is not None
+
+      hard_issues = []
+      review_access = {}
+      for library in libraries:
+          profiles = all_profiles[all_profiles['DSBD_NAME'] == library].copy()
+          if profiles.empty:
+              candidates = all_profiles[
+                  all_profiles['DSBD_NAME'].map(
+                      lambda pattern: matches(pattern, library)
+                  )
+              ].copy()
+              if not candidates.empty:
+                  candidates['_specificity'] = candidates['DSBD_NAME'].str.replace(
+                      '*', '', regex=False
+                  ).str.replace('%', '', regex=False).str.len()
+                  best = candidates['_specificity'].max()
+                  profiles = candidates[candidates['_specificity'] == best].copy()
+
+          if profiles.empty:
+              hard_issues.append(f'{library}: no covering RACF profile')
+              continue
+
+          for _, profile in profiles.iterrows():
+              uacc = str(profile['DSBD_UACC']).upper()
+              level = str(profile['DSBD_AUDIT_LEVEL']).upper()
+              okqual = str(profile['DSBD_AUDIT_OKQUAL']).upper()
+              if ranks.get(uacc, 99) > ranks['NONE']:
+                  hard_issues.append(f'{library}: UACC={uacc}')
+              if audit_required and not (
+                  level == 'ALL' and
+                  ranks.get(okqual, 99) <= ranks[required_audit_threshold]
+              ):
+                  hard_issues.append(
+                      f'{library}: AUDIT={level}({okqual or "NONE"})'
+                  )
+
+              related = all_access[
+                  (all_access['DSACC_NAME'] == profile['DSBD_NAME']) &
+                  (
+                      all_access['DSACC_ACCESS'].map(
+                          lambda value: ranks.get(str(value).upper(), -1)
+                      ) >= ranks['UPDATE']
+                  )
+              ]
+              for _, permit in related.iterrows():
+                  auth_id = str(permit['DSACC_AUTH_ID']).upper()
+                  access = str(permit['DSACC_ACCESS']).upper()
+                  item = review_access.setdefault(auth_id, {
+                      'auth_type': auth_type(auth_id),
+                      'max_access': access,
+                      'libraries': set(),
+                  })
+                  if ranks.get(access, -1) > ranks.get(item['max_access'], -1):
+                      item['max_access'] = access
+                  item['libraries'].add(library)
+
+      sysprog = {str(x).upper() for x in sysprog_list} if sysprog_list else None
+
+      def _approved(auth_id):
+          if sysprog is None:
+              return 'UNREVIEWED'
+          return 'YES' if str(auth_id).upper() in sysprog else 'NO'
+
+      findings = [
+          {
+              'AUTH_ID': auth_id,
+              'AUTH_TYPE': item['auth_type'],
+              'MAX_ACCESS': item['max_access'],
+              'LIBRARY_COUNT': len(item['libraries']),
+              'LIBRARIES': ', '.join(sorted(item['libraries'])),
+              'APPROVED': _approved(auth_id),
+          }
+          for auth_id, item in sorted(review_access.items())
+      ]
+      unapproved = [f for f in findings if f['APPROVED'] != 'YES']
+
+      hard_issues = sorted(set(hard_issues))
+      if hard_issues:
+          status = 'FAIL'
+          detail = (
+              f'{len(hard_issues)} PROCLIB protection issue(s): ' +
+              '; '.join(hard_issues[:10]) +
+              ('; ...' if len(hard_issues) > 10 else '') +
+              f'; {len(unapproved)} unique UPDATE-or-greater '
+              'user/group ID(s) require validation'
+          )
+      elif unapproved:
+          status = 'REVIEW'
+          detail = (
+              f'PROCLIB profile settings meet technical thresholds; validate '
+              f'{len(unapproved)} unique UPDATE-or-greater '
+              'user/group ID(s) not in the system-programmer list'
+          )
+      elif findings:
+          status = 'PASS'
+          detail = (
+              f'PROCLIB write access is limited to {len(findings)} approved '
+              'system-programmer ID(s)'
+          )
+      else:
+          status = 'PASS'
+          detail = f'All {len(libraries)} PROCLIB entries meet the technical thresholds'
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    Configure ESM dataset rules to restrict all WRITE and/or greater access to all PROCLIBs referenced in the Master JCL and JES2 or JES3 procedure for started tasks (STCs) and TSO logons to systems programming personnel only.
+
+    Suggestion on how to update system to be compliant with this vulnerability:
+
+    NOTE: All examples are only examples and may not reflect your operating environment.
+
+    Obtain only the PROCLIB data sets that contain STC and TSO procedures. The data sets to be reviewed are obtained using the following steps:
+
+    - All data sets contained in the MSTJCLxx member in the DD statement concatenation for IEFPDSI and IEFJOBS.
+    - The data set in the PROCxx DD statement concatenation that is within the JES2 procedure or identified in the JES2 dynamic PROCLIB definitions. The specific PROCxx DD statement that is used is obtained from the PROCLIB entry for the JOBCLASSes of STC and TSU. The following are the data sets the process will obtain for analysis:
+
+    MSTJCL00
+
+    //MSTJCL00 JOB MSGLEVEL=(1,1),TIME=1440
+    //EXEC PGM=IEEMB860,DPRTY=(15,15)
+    //STCINRDR DD SYSOUT=(A,INTRDR)
+    //TSOINRDR DD SYSOUT=(A,INTRDR)
+    //IEFPDSI DD DSN=SYS3.PROCLIB,DISP=SHR <<===
+    //DD DSN=SYS2.PROCLIB,DISP=SHR <<===
+    //DD DSN=SYS1.PROCLIB,DISP=SHR <<===
+    //SYSUADS DD DSN=SYS1.UADS,DISP=SHR
+    //SYSLBC DD DSN=SYS1.BRODCAST,DISP=SHR
+
+    JES2
+
+    //JES2 PROC
+    //IEFPROC EXEC PGM=HASJES20,PARM=NOREQ,
+    //DPRTY=(15,15),TIME=1440,PERFORM=9
+    //ALTPARM DD DISP=SHR,
+    //DSN=SYS1.PARMLIB(JES2BKUP)
+    //HASPPARM DD DISP=SHR,
+    //DSN=SYS1.PARMLIB(JES2PARM)
+    //PROC00 DD DSN=SYS3.PROCLIB,DISP=SHR <<===
+    //DD DSN=SYS2.PROCLIB,DISP=SHR <<===
+    //DD DSN=SYS1.PROCLIB,DISP=SHR <<===
+    //PROC01 DD DSN=SYS4.USERPROC,DISP=SHR
+    //DD DSN=SYS3.PROCLIB,DISP=SHR
+    //DD DSN=SYS2.PROCLIB,DISP=SHR
+    //DD DSN=SYS1.PROCLIB,DISP=SHR
+    //IEFRDER DD SYSOUT=*
+    //HASPLIST DD DDNAME=IEFRDER
+
+    JES2 initialization parameter JOBCLASS PROCLIB entries
+
+    JOBCLASS(*) ACCT=NO, /* ACCT # NOT REQUIRED (DEF.)*/
+    ...
+    PROCLIB=01, /* DEFAULT TO //PROC01 DD (DEF.)*/
+    ...
+    JOBCLASS(STC) AUTH=ALL, /* ALLOW ALL COMMANDS (DEF.)*/
+    ...
+    PROCLIB=00, /* USE //PROC00 DD (DEF.)*/
+    ...
+    JOBCLASS(TSU) AUTH=ALL, /* ALLOW ALL COMMANDS (DEF.)*/
+    ...
+    PROCLIB=00, /* USE //PROC00 DD (DEF.)*/
+    ...
+
+    PROCLIB data set that will be used in the access authorization process:
+
+    SYS3.PROCLIB
+    SYS2.PROCLIB
+    SYS1.PROCLIB
+
+    The following PROCLIB data set will NOT be used or evaluated:
+    SYS4.USERPROC
+
+    Recommendation for sites:
+
+    The following are recommendations for the sites to ensure only PROCLIB data sets that contain the STC and TSO procedures are protected.
+
+    - Remove all application PROCLIB data sets from MSTJCLxx and JES2 procedures. The customer will have all JCL changed to use the JCLLIB JCL statement to refer to the application PROCLIB data sets.
+
+    Example:
+    //USERPROC JCLLIB ORDER=(SYS4.USERPROC)
+
+    - Remove all access to the application PROCLIB data sets and only authorize system programming personnel WRITE and/or greater access to these data sets.
+
+    - Document the application PROCLIB data set access for the customers that require WRITE and/or greater access. Use this documentation as justification for the inappropriate access created by the scripts.
+
+    - Change MSTJCLxx and JES2 procedure to identify STC and TSO PROCLIB data sets separate from application PROCLIB data sets. The following is a list of actions that can be performed to accomplish this recommendation:
+
+    a. Ensure that MSTJCLxx contains only PROCLIB data sets that contain STC and TSO procedures.
+    b. If an application PROCLIB data set is required for JES2, ensure that the JES2 procedure specifies more than one PROCxx DD statement concatenation or identified in the JES2 dynamic PROCLIB definitions. Identify one PROCxx DD statement data set concatenation that contains the STC and TSO PROCLIB data sets. Identify one or more additional PROCxx DD statements that can contain any other PROCLIB data sets. The concatenation of the additional PROCxx DD statements can contain the same data sets that are identified in the PROCxx DD statement for STC and TSO. The following is an example of the JES2 procedure:
+
+    //JES2 PROC
+    //IEFPROC EXEC PGM=HASJES20,PARM=NOREQ,
+    //DPRTY=(15,15),TIME=1440,PERFORM=9
+    //ALTPARM DD DISP=SHR,
+    //DSN=SYS1.PARMLIB(JES2BKUP)
+    //HASPPARM DD DISP=SHR,
+    //DSN=SYS1.PARMLIB(JES2PARM)
+    //PROC00 DD DSN=SYS3.PROCLIB,DISP=SHR
+    //DD DSN=SYS2.PROCLIB,DISP=SHR
+    //DD DSN=SYS1.PROCLIB,DISP=SHR
+    //PROC01 DD DSN=SYS4.USERPROC,DISP=SHR
+    //DD DSN=SYS3.PROCLIB,DISP=SHR
+    //DD DSN=SYS2.PROCLIB,DISP=SHR
+    //DD DSN=SYS1.PROCLIB,DISP=SHR
+    //IEFRDER DD SYSOUT=*
+    //HASPLIST DD DDNAME=IEFRDER
+
+    c. Ensure that the JES2 configuration file is changed to specify that the PROCLIB entry for the STC and TSU JOBCLASSes point to the proper PROCxx entry within the JES2 procedure or JES2 dynamic PROCLIB definitions that contain the STC and/or TSO procedures. All other JOBCLASSes can specify a PROCLIB entry that uses the same PROCxx or any other PROCxx DD statement identified in the JES2 procedure or identified in the JES2 dynamic PROCLIB definitions. The following is an example of the JES2 initialization parameters:
+
+    JOBCLASS(*) ACCT=NO, /* ACCT # NOT REQUIRED (DEF.)*/
+    ...
+    PROCLIB=01, /* DEFAULT TO //PROC01 DD (DEF.)*/
+    ...
+    JOBCLASS(STC) AUTH=ALL, /* ALLOW ALL COMMANDS (DEF.)*/
+    ...
+    PROCLIB=00, /* USE //PROC00 DD (DEF.)*/
+    ...
+    JOBCLASS(TSU) AUTH=ALL, /* ALLOW ALL COMMANDS (DEF.)*/
+    ...
+    PROCLIB=00, /* USE //PROC00 DD (DEF.)*/
+    ...
+
+    d. Ensure that only system programming personnel are authorized WRITE and/or greater access to PROCLIB data sets that contain STC and TSO procedures.
+  source_metadata:
+    vulnerability_id: V-223687
+    rule_id: SV-223687r1137691_rule
+    rule_version: RACF-ES-000390
+    check_id: C-25360r869468_chk
+    fix_id: F-25348r868815_fix
+    cci: CCI-000213
+    documentable: 'false'
+    coverage: HYBRID
+    evidence_note: The runtime --proclib-list supplies the active STC and TSO procedure libraries. Profile
+      coverage and UACC are automated; unique UPDATE-or-greater user/group IDs require validation as systems
+      programming personnel.
+- control_id: STIG-V-223697
+  title: IBM z/OS SYS1.PARMLIB must be properly protected.
+  severity: high
+  requirement: |-
+    Discussion:
+    Without the capability to restrict which roles and individuals can select which events are audited, unauthorized personnel may be able to prevent the auditing of critical events. Misconfigured audits may degrade the system's performance by overwhelming the audit log. Misconfigured audits may also make it more difficult to establish, correlate, and investigate the events relating to an incident or identify those responsible for one.
+
+    SYS1.PARMLIB contains the parameters that control audit configuration. Unauthorized access could result in the compromise of the operating system environment, ACP, and customer data.
+
+    Satisfies: SRG-OS-000063-GPOS-00032, SRG-OS-000080-GPOS-00048, SRG-OS-000259-GPOS-00100, SRG-OS-000324-GPOS-00125, SRG-OS-000337-GPOS-00129, SRG-OS-000362-GPOS-00149
+
+    Check procedure:
+    Execute a dataset list of access to SYS1.PARMLIB.
+
+    If the ESM data set rules for SYS1.PARMLIB allow inappropriate (e.g., global READ) access, this is a finding.
+
+    If data set rules for SYS1.PARMLIB do not restrict READ, WRITE or greater access to only systems programming personnel, this is a finding.
+
+    If data set rules for SYS1.PARMLIB do not restrict READ and UPDATE access to only domain level security administrators, this is a finding.
+
+    If data set rules for SYS1.PARMLIB do not restrict READ access to only system Level Started Tasks, authorized Data Center personnel, and auditors, this is a finding.
+
+    If data set rules for SYS1.PARMLIB do not specify that all (i.e., failures and successes) UPDATE and/or ALTER access will be logged, this is a finding.
+  stig:
+    rule_id: SV-223697r998344_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-ES-000500
+    reference: V-223697 | SV-223697r998344_rule | CCI-000171
+  data_sources_needed:
+  - irrdbu00
+  - parmlib_list
+  implementation:
+    engine: python
+    dataset: irrdbu00.datasets
+    logic: |
+      import re
+
+      libraries = parmlib_list
+      ranks = {'NONE': 0, 'EXECUTE': 1, 'READ': 2, 'UPDATE': 3, 'CONTROL': 4, 'ALTER': 5}
+      audit_required = True
+      required_audit_threshold = 'UPDATE'
+      user_ids = set(irrdbu00.users['USBD_NAME'].astype(str).str.upper())
+      group_ids = set(irrdbu00.groups['GPBD_NAME'].astype(str).str.upper())
+      all_profiles = irrdbu00.datasets
+      all_access = irrdbu00.datasetAccess
+
+      def auth_type(value):
+          auth_id = str(value).upper()
+          if auth_id in user_ids:
+              return 'USER'
+          if auth_id in group_ids:
+              return 'GROUP'
+          return 'UNRESOLVED'
+
+      def matches(pattern, value):
+          expression = re.escape(str(pattern))
+          expression = expression.replace(r'\*\*', '.*')
+          expression = expression.replace(r'\*', '[^.]*').replace('%', '[^.]')
+          return re.fullmatch(expression, value) is not None
+
+      hard_issues = []
+      review_access = {}
+      for library in libraries:
+          profiles = all_profiles[all_profiles['DSBD_NAME'] == library].copy()
+          if profiles.empty:
+              candidates = all_profiles[
+                  all_profiles['DSBD_NAME'].map(
+                      lambda pattern: matches(pattern, library)
+                  )
+              ].copy()
+              if not candidates.empty:
+                  candidates['_specificity'] = candidates['DSBD_NAME'].str.replace(
+                      '*', '', regex=False
+                  ).str.replace('%', '', regex=False).str.len()
+                  best = candidates['_specificity'].max()
+                  profiles = candidates[candidates['_specificity'] == best].copy()
+
+          if profiles.empty:
+              hard_issues.append(f'{library}: no covering RACF profile')
+              continue
+
+          for _, profile in profiles.iterrows():
+              uacc = str(profile['DSBD_UACC']).upper()
+              level = str(profile['DSBD_AUDIT_LEVEL']).upper()
+              okqual = str(profile['DSBD_AUDIT_OKQUAL']).upper()
+              if ranks.get(uacc, 99) > ranks['NONE']:
+                  hard_issues.append(f'{library}: UACC={uacc}')
+              if audit_required and not (
+                  level == 'ALL' and
+                  ranks.get(okqual, 99) <= ranks[required_audit_threshold]
+              ):
+                  hard_issues.append(
+                      f'{library}: AUDIT={level}({okqual or "NONE"})'
+                  )
+
+              related = all_access[
+                  (all_access['DSACC_NAME'] == profile['DSBD_NAME']) &
+                  (
+                      all_access['DSACC_ACCESS'].map(
+                          lambda value: ranks.get(str(value).upper(), -1)
+                      ) >= ranks['UPDATE']
+                  )
+              ]
+              for _, permit in related.iterrows():
+                  auth_id = str(permit['DSACC_AUTH_ID']).upper()
+                  access = str(permit['DSACC_ACCESS']).upper()
+                  item = review_access.setdefault(auth_id, {
+                      'auth_type': auth_type(auth_id),
+                      'max_access': access,
+                      'libraries': set(),
+                  })
+                  if ranks.get(access, -1) > ranks.get(item['max_access'], -1):
+                      item['max_access'] = access
+                  item['libraries'].add(library)
+
+      sysprog = {str(x).upper() for x in sysprog_list} if sysprog_list else None
+
+      def _approved(auth_id):
+          if sysprog is None:
+              return 'UNREVIEWED'
+          return 'YES' if str(auth_id).upper() in sysprog else 'NO'
+
+      findings = [
+          {
+              'AUTH_ID': auth_id,
+              'AUTH_TYPE': item['auth_type'],
+              'MAX_ACCESS': item['max_access'],
+              'LIBRARY_COUNT': len(item['libraries']),
+              'LIBRARIES': ', '.join(sorted(item['libraries'])),
+              'APPROVED': _approved(auth_id),
+          }
+          for auth_id, item in sorted(review_access.items())
+      ]
+      unapproved = [f for f in findings if f['APPROVED'] != 'YES']
+
+      hard_issues = sorted(set(hard_issues))
+      if hard_issues:
+          status = 'FAIL'
+          detail = (
+              f'{len(hard_issues)} PARMLIB protection issue(s): ' +
+              '; '.join(hard_issues[:10]) +
+              ('; ...' if len(hard_issues) > 10 else '') +
+              f'; {len(unapproved)} unique UPDATE-or-greater '
+              'user/group ID(s) require validation'
+          )
+      elif unapproved:
+          status = 'REVIEW'
+          detail = (
+              f'PARMLIB profile settings meet technical thresholds; validate '
+              f'{len(unapproved)} unique UPDATE-or-greater '
+              'user/group ID(s) not in the system-programmer list'
+          )
+      elif findings:
+          status = 'PASS'
+          detail = (
+              f'PARMLIB write access is limited to {len(findings)} approved '
+              'system-programmer ID(s)'
+          )
+      else:
+          status = 'PASS'
+          detail = f'All {len(libraries)} PARMLIB entries meet the technical thresholds'
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    Configure access rules for SYS1.PARMLIB as follows:
+
+    Systems programming personnel will be authorized to WRITE or greater the SYS1.PARMLIB concatenation.
+
+    Domain level security administrators can be authorized to update the SYS1.PARMLIB concatenation.
+
+    System Level Started Tasks, authorized Data Center personnel, and auditor can be authorized read access by the information system security officer (ISSO).
+
+    All WRITE or greater access is logged.
+  source_metadata:
+    vulnerability_id: V-223697
+    rule_id: SV-223697r998344_rule
+    rule_version: RACF-ES-000500
+    check_id: C-25370r514779_chk
+    fix_id: F-25358r998343_fix
+    cci: CCI-000171
+    documentable: 'false'
+    coverage: HYBRID
+    evidence_note: The runtime --parmlib-list supplies the active PARMLIB concatenation. Profile coverage,
+      UACC, and UPDATE-or-greater auditing are automated; unique UPDATE-or-greater user/group IDs are
+      returned for role validation.
+- control_id: STIG-V-223703
+  title: IBM RACF must define WARN = NO on all profiles.
+  severity: high
+  requirement: |-
+    Discussion:
+    Failure to restrict system access to authenticated users negatively impacts operating system security.
+
+    Check procedure:
+    Review all Dataset and resource profiles in the RACF database.
+
+    If any are not defined with WARN = NO, this is a finding.
+  stig:
+    rule_id: SV-223703r991591_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-ES-000560
+    reference: V-223703 | SV-223703r991591_rule | CCI-000366
+  data_sources_needed:
+  - irrdbu00
+  implementation:
+    engine: python
+    dataset: irrdbu00.datasets
+    logic: |
+      dataset_warn = irrdbu00.datasets[irrdbu00.datasets['DSBD_WARNING'] == 'YES']
+      general_warn = irrdbu00.generals[irrdbu00.generals['GRBD_WARNING'] == 'YES']
+      findings = (
+          [
+              {'PROFILE_TYPE': 'DATASET', 'CLASS': 'DATASET', 'NAME': row['DSBD_NAME']}
+              for _, row in dataset_warn.iterrows()
+          ] +
+          [
+              {
+                  'PROFILE_TYPE': 'GENERAL', 'CLASS': row['GRBD_CLASS_NAME'],
+                  'NAME': row['GRBD_NAME']
+              }
+              for _, row in general_warn.iterrows()
+          ]
+      )
+      count = len(findings)
+      status = 'PASS' if count == 0 else 'FAIL'
+      detail = f'{count} RACF profile(s) have WARNING mode enabled'
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: Define each dataset and resource profile with WARN = NO
+  source_metadata:
+    vulnerability_id: V-223703
+    rule_id: SV-223703r991591_rule
+    rule_version: RACF-ES-000560
+    check_id: C-25376r514797_chk
+    fix_id: F-25364r514798_fix
+    cci: CCI-000366
+    documentable: 'false'
+    coverage: AUTOMATED
+    evidence_note: All data-set and general-resource WARNING flags are checked.
+- control_id: STIG-V-223704
+  title: The IBM RACF PROTECTALL SETROPTS value specified must be properly set.
+  severity: high
+  requirement: |-
+    Discussion:
+    Configuring the operating system to implement organization-wide security implementation guides and security checklists ensures compliance with federal standards and establishes a common security baseline across DoD that reflects the most restrictive security posture consistent with operational requirements.
+
+    Configuration settings are the set of parameters that can be changed in hardware, software, or firmware components of the system that affect the security posture and/or functionality of the system. Security-related parameters are those parameters impacting the security state of the system, including the parameters required to satisfy other security control requirements. Security-related parameters include, for example: registry settings; account, file, directory permission settings; and settings for functions, ports, protocols, services, and remote connections.
+
+    Check procedure:
+    From the ISPF Command Shell enter:
+    SETROPTS LIST
+
+    If the SETROPTS values for PROTECTALL is ACTIVE and set to FAIL, this is not a finding.
+
+    If the SETROPTS PROTECTALL parameter is set to NOPROTECTALL or PROTECTALL(WARNING), this is a finding.
+
+    Additional analysis may be required to determine whether this finding should be downgraded to a Category II or remain a Category I.
+
+    Example of a Category I finding where not a further analysis is required:
+
+    Control Options: SETROPTS NOPROTECTALL
+
+    Example of a possible Category I finding requiring additional analysis:
+
+    Control Options: SETROPTS PROTECTALL(WARNING)
+
+    PROTECTALL(WARNING) allows access to a data set only if it is not at protected by a profile in the DATASET resource class. Therefore if all sensitive data sets are properly protected by profiles in the DATASET resource class, PROTECTALL(WARNING) will not at allow unauthorized access. This situation allows for a downgrade to a Category II.
+  stig:
+    rule_id: SV-223704r991589_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-ES-000570
+    reference: V-223704 | SV-223704r991589_rule | CCI-000366
+  data_sources_needed:
+  - setropts
+  implementation:
+    engine: python
+    dataset: setropts.fieldInfo
+    logic: |
+      row = df[df['Setting'] == 'PROTALL']
+      value = str(row.iloc[0]['Value']).upper() if len(row) else 'OFF'
+      status = 'PASS' if value == 'FAILURES' else 'FAIL'
+      detail = f'PROTALL={value} (required: FAILURES)'
+      findings = [{'Setting': 'PROTALL', 'Value': value}]
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    Evaluate the impact associated with implementation of the control option. Develop a plan of action to implement the control option as specified in the example below:
+
+    The RACF Command SETR LIST will show the status of RACF Controls including the value for the PROTECTALL Option.
+
+    PROTECTALL is ACTIVATED and set to FAIL by issuing the command SETR PROTECTALL(FAIL).
+  source_metadata:
+    vulnerability_id: V-223704
+    rule_id: SV-223704r991589_rule
+    rule_version: RACF-ES-000570
+    check_id: C-25377r514800_chk
+    fix_id: F-25365r514801_fix
+    cci: CCI-000366
+    documentable: 'false'
+    coverage: AUTOMATED
+    evidence_note: PROTECTALL mode is available directly from SETROPTS.
+- control_id: STIG-V-223729
+  title: NIST FIPS-validated cryptography must be used to protect passwords in the security database.
+  severity: high
+  requirement: |-
+    Discussion:
+    Password complexity is one factor of several that determines how long it takes to crack a password. The more complex the password, the greater the number of possible combinations that need to be tested before the password is compromised.
+
+    Operating systems utilizing encryption are required to use FIPS-compliant mechanisms for authenticating to cryptographic modules.
+
+    Satisfies: SRG-OS-000073-GPOS-00041, SRG-OS-000074-GPOS-00042, SRG-OS-000120-GPOS-00061
+
+    Check procedure:
+    From the ISPF Command Shell enter:
+    SETRopts List
+
+    If the following is specified under PASSWORD PROCESSING OPTIONS: THE ACTIVE PASSWORD ENCRYPTION ALGORITHM IS KDFAES, this is not a finding.
+  stig:
+    rule_id: SV-223729r998355_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-ES-000820
+    reference: V-223729 | SV-223729r998355_rule | CCI-004062
+  data_sources_needed:
+  - setropts
+  implementation:
+    engine: python
+    dataset: setropts.fieldInfo
+    logic: |
+      row = df[df['Setting'] == 'PWDALG']
+      value = str(row.iloc[0]['Value']).upper() if len(row) else 'NOT SET'
+      status = 'PASS' if value == 'KDFAES' else 'FAIL'
+      detail = f'PWDALG={value} (required: KDFAES)'
+      findings = [{'Setting': 'PWDALG', 'Value': value}]
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    Evaluate the impact associated with implementation of the control option. Develop a plan of action to implement the control option as specified below:
+
+    For z/OS release 1.12 through z/OS release 2.1 APARs OA43998 and OA43999 must be applied.
+
+    Set the passwords option for algorithm to KDFAES.
+
+    Sample syntax to activate:
+    SETRopts PASSWORD(ALGORITHM(KDFAES))
+  source_metadata:
+    vulnerability_id: V-223729
+    rule_id: SV-223729r998355_rule
+    rule_version: RACF-ES-000820
+    check_id: C-25402r514875_chk
+    fix_id: F-25390r514876_fix
+    cci: CCI-004062
+    documentable: 'false'
+    coverage: AUTOMATED
+    evidence_note: The active password algorithm is available from SETROPTS.
+- control_id: STIG-V-223760
+  title: IBM RACF must be installed and active on the system.
+  severity: high
+  requirement: |-
+    Discussion:
+    Enterprise environments make account management for operating systems challenging and complex. A manual process for account management functions adds the risk of a potential oversight or other errors. IBM z/OS requires an external security manager to assure proper account management.
+
+    Check procedure:
+    Refer to IEASYS00 member in SYS1.PARMLIB Concatenation. Determine proper IEFSSnxx member.
+
+    If RACF is defined in the SubSystem member, this is not a finding.
+  stig:
+    rule_id: SV-223760r958362_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-OS-000040
+    reference: V-223760 | SV-223760r958362_rule | CCI-000015
+  data_sources_needed:
+  - setropts
+  - irrdbu00
+  implementation:
+    engine: python
+    dataset: setropts.fieldInfo
+    logic: |
+      status = 'PASS'
+      detail = 'RACF runtime evidence loaded successfully from SETROPTS and IRRDBU00'
+      findings = []
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: Refer to the IBM Security Server RACF System Programmer Guide and the IBM Security Server
+    RACF Security Administrator guide to properly implement RACF on the system.
+  source_metadata:
+    vulnerability_id: V-223760
+    rule_id: SV-223760r958362_rule
+    rule_version: RACF-OS-000040
+    check_id: C-25433r514968_chk
+    fix_id: F-25421r514969_fix
+    cci: CCI-000015
+    documentable: 'false'
+    coverage: AUTOMATED
+    evidence_note: Successful RACF SETROPTS and IRRDBU00 exports demonstrate that RACF is active.
+- control_id: STIG-V-223777
+  title: IBM RACF must define UACC of NONE on all profiles.
+  severity: high
+  requirement: |-
+    Discussion:
+    The operating system must employ a deny-all, permit-by-exception policy to allow the execution of authorized software programs.
+
+    Check procedure:
+    Review all Dataset and resource profiles in the RACF database.
+
+    If any are not defined with UACC NONE, this is a finding.
+
+    There is an exception when evaluating the UACC for DIGTCERT and NODES resource classes.
+
+    The universal access (UACC) for DIGTCERT profiles:
+    For profiles in classes other than DIGTCERT, the valid values are NONE, READ, EXECUTE, UPDATE, CONTROL, and ALTER. For DIGTCERT profiles, the valid values are TRUST, NOTRUST, and HIGHTRST.
+    If DIGTCERT Profiles are defined with other than UACC NONE, this is not a finding.
+
+    The universal access (UACC) for NODES:
+    A UACC of NONE fails the inbound job.
+    If NODES profiles are defined with other than UACC NONE, this is not a finding.
+  stig:
+    rule_id: SV-223777r1050763_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-OS-000210
+    reference: V-223777 | SV-223777r1050763_rule | CCI-001774
+  data_sources_needed:
+  - irrdbu00
+  implementation:
+    engine: python
+    dataset: irrdbu00.datasets
+    logic: |
+      dataset_bad = irrdbu00.datasets[irrdbu00.datasets['DSBD_UACC'] != 'NONE']
+      general_bad = irrdbu00.generals[
+          (~irrdbu00.generals['GRBD_CLASS_NAME'].isin(['DIGTCERT', 'NODES'])) &
+          (irrdbu00.generals['GRBD_UACC'] != 'NONE')
+      ]
+      findings = (
+          [
+              {
+                  'PROFILE_TYPE': 'DATASET', 'CLASS': 'DATASET',
+                  'NAME': row['DSBD_NAME'], 'UACC': row['DSBD_UACC']
+              }
+              for _, row in dataset_bad.iterrows()
+          ] +
+          [
+              {
+                  'PROFILE_TYPE': 'GENERAL', 'CLASS': row['GRBD_CLASS_NAME'],
+                  'NAME': row['GRBD_NAME'], 'UACC': row['GRBD_UACC']
+              }
+              for _, row in general_bad.iterrows()
+          ]
+      )
+      count = len(findings)
+      status = 'PASS' if count == 0 else 'FAIL'
+      detail = (
+          f'{count} profile(s) have UACC other than NONE '
+          '(DIGTCERT and NODES exceptions applied)'
+      )
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: Define each dataset and resource profile with UACC(NONE), excluding the exceptions of NODES
+    and DIGTCERT profiles.
+  source_metadata:
+    vulnerability_id: V-223777
+    rule_id: SV-223777r1050763_rule
+    rule_version: RACF-OS-000210
+    check_id: C-25450r1050761_chk
+    fix_id: F-25438r1050762_fix
+    cci: CCI-001774
+    documentable: 'false'
+    coverage: AUTOMATED
+    evidence_note: All data-set and general-resource UACC values are checked with the documented DIGTCERT
+      and NODES exceptions.
+- control_id: STIG-V-223781
+  title: Unsupported system software must not be installed and/ or active on the system.
+  severity: high
+  requirement: |-
+    Discussion:
+    Control of program execution is a mechanism used to prevent execution of unauthorized programs. Some operating systems may provide a capability that runs counter to the mission or provides users with functionality that exceeds mission requirements. This includes functions and services installed at the operating system level.
+
+    Some of the programs, installed by default, may be harmful or may not be necessary to support essential organizational operations (e.g., key missions, functions). Removal of executable programs is not always possible; therefore, establishing a method of preventing program execution is critical to maintaining a secure system baseline.
+
+    Methods for complying with this requirement include restricting execution of programs in certain environments, while preventing execution in other environments; or limiting execution of certain program functionality based on organization-defined criteria (e.g., privileges, subnets, sandboxed environments, or roles).
+
+    Check procedure:
+    This check applies to all products that meet the following criteria:
+
+    - Uses authorized and restricted z/OS interfaces by utilizing Authorized Program Facility (APF) authorized modules or libraries.
+    - Requires access to system datasets or sensitive information or requires special or privileged authority to run.
+
+    For the products in the above category, refer to the Vendor's support lifecycle information for current versions and releases.
+
+    If the software products currently running on the reviewed system are at a version greater than or equal to the products listed in the vendor's Support Lifecycle information, this is not a finding.
+  stig:
+    rule_id: SV-223781r958804_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-OS-000250
+    reference: V-223781 | SV-223781r958804_rule | CCI-001764
+  data_sources_needed: []
+  implementation:
+    engine: python
+    dataset: ''
+    logic: |
+      status = 'REVIEW'
+      detail = "Additional evidence required for V-223781: Collect an installed/running software inventory with versions and compare it to each vendor's current support lifecycle (for example SCRT and SMP/E CSI)."
+      findings = []
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    For all products that meet the following criteria:
+
+    - Uses authorized and restricted z/OS interfaces by utilizing Authorized Program Facility (APF) authorized modules or libraries.
+    - Requires access to system datasets or sensitive information or requires special or privileged authority to run.
+
+    The ISSO will ensure that unsupported system software for the products in the above category is removed or upgraded prior to a vendor dropping support.
+
+    Authorized software that is NO longer supported is a CAT I vulnerability. The customer and site will be given six months to mitigate the risk, develop a supported solution, or obtain a formal letter approving such risk/software.
+  source_metadata:
+    vulnerability_id: V-223781
+    rule_id: SV-223781r958804_rule
+    rule_version: RACF-OS-000250
+    check_id: C-25454r868857_chk
+    fix_id: F-25442r868858_fix
+    cci: CCI-001764
+    documentable: 'false'
+    coverage: MANUAL
+    evidence_note: Collect an installed/running software inventory with versions and compare it to each
+      vendor's current support lifecycle (for example SCRT and SMP/E CSI).
+- control_id: STIG-V-223788
+  title: The IBM z/OS systems requiring data-at-rest protection must properly employ IBM DS8880 or equivalent
+    hardware solutions for full disk encryption.
+  severity: high
+  requirement: |-
+    Discussion:
+    This control addresses the confidentiality and integrity of information at rest and covers user information and system information. Information at rest refers to the state of information when it is located on storage devices as specific components of information systems. Operating systems handling data requiring "data at rest" protections must employ cryptographic mechanisms to prevent unauthorized disclosure and modification of the information at rest.
+
+    Selection of a cryptographic mechanism is based on the need to protect the integrity of organizational information. The strength of the mechanism is commensurate with the security category and/or classification of the information. Organizations have the flexibility to either encrypt all information on storage devices (i.e., full disk encryption) or encrypt specific data structures (e.g., files, records, or fields).
+
+    Use of weak or untested encryption algorithms undermines the purposes of utilizing encryption to protect data. The operating system must implement cryptographic modules adhering to the higher standards approved by the federal government since this provides assurance they have been tested and validated.
+
+    Satisfies: SRG-OS-000185-GPOS-00079, SRG-OS-000405-GPOS-00184, SRG-OS-000404-GPOS-00183, SRG-OS-000396-GPOS-00176
+
+    Check procedure:
+    Determine if IBM's DS8880 Disks or equivalent hardware solutions are in use.
+
+    If they are not in use for systems that require data at rest, this is a finding.
+  stig:
+    rule_id: SV-223788r1028297_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-OS-000320
+    reference: V-223788 | SV-223788r1028297_rule | CCI-001199
+  data_sources_needed: []
+  implementation:
+    engine: python
+    dataset: ''
+    logic: |
+      status = 'REVIEW'
+      detail = 'Additional evidence required for V-223788: Obtain storage-controller encryption configuration and key-management evidence from the storage team; RACF data does not describe disk encryption.'
+      findings = []
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: Employ IBM's DS8880 hardware or equivalent hardware solutions to ensure full disk encryption.
+  source_metadata:
+    vulnerability_id: V-223788
+    rule_id: SV-223788r1028297_rule
+    rule_version: RACF-OS-000320
+    check_id: C-25461r803636_chk
+    fix_id: F-25449r803664_fix
+    cci: CCI-001199
+    documentable: 'false'
+    coverage: MANUAL
+    evidence_note: Obtain storage-controller encryption configuration and key-management evidence from
+      the storage team; RACF data does not describe disk encryption.
+- control_id: STIG-V-223807
+  title: The IBM RACF SSH daemon must be configured to use a FIPS 140-2 compliant cryptographic algorithm
+    to protect confidential information and remote access sessions.
+  severity: high
+  requirement: |-
+    Discussion:
+    Use of weak or untested encryption algorithms undermines the purposes of utilizing encryption to protect data. Cryptographic modules must adhere to the higher standards approved by the federal government since this provides assurance they have been tested and validated.
+
+    Remote access (e.g., RDP) is access to DOD nonpublic information systems by an authorized user (or an information system) communicating through an external, nonorganization-controlled network. Remote access methods include, for example, dial-up, broadband, and wireless.
+
+    Cryptographic mechanisms used for protecting the integrity of information include, for example, signed hash functions using asymmetric cryptography enabling distribution of the public key to verify the hash information while maintaining the confidentiality of the secret key used to generate the hash.
+
+    Check procedure:
+    Locate the SSH daemon configuration file, which may be found in /etc/ssh/ directory.
+
+    Alternately:
+    From the Unix System Services ISPF Shell, navigate to ribbon select tools.
+    Select option 1 - Work with Processes.
+
+    If SSH Daemon is not active, this is not a finding.
+
+    Examine SSH daemon configuration file.
+    sshd_config
+
+    If there are no "Ciphers" lines, or the ciphers list contains any cipher not starting with "aes", this is a finding.
+
+    If the MACs line is not configured to "hmac-sha1" or greater this is a finding.
+
+    Examine the z/OS-specific sshd server systemwide configuration:
+    zos_sshd_config
+
+    If any of the following is untrue, this is a finding.
+
+    FIPSMODE=YES
+    CiphersSource=ICSF
+    MACsSource=ICSF
+  stig:
+    rule_id: SV-223807r1083014_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-SH-000020
+    reference: V-223807 | SV-223807r1083014_rule | CCI-000068
+  data_sources_needed: []
+  implementation:
+    engine: python
+    dataset: ''
+    logic: |
+      status = 'REVIEW'
+      detail = 'Additional evidence required for V-223807: Collect the active sshd_config and zos_sshd_config files plus evidence of whether the SSH daemon is running.'
+      findings = []
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    Edit the SSH daemon configuration and remove any ciphers not starting with  "aes". If necessary, add a "Ciphers" line using FIPS 140-2 compliant algorithms.
+
+    Configure for message authentication to MACs "hmac-sha1" or greater.
+
+    Edit the z/OS-specific sshd server systemwide configuration file configuration as follows:
+    FIPSMODE=YES
+    CiphersSource=ICSF
+    MACsSource=ICSF
+  source_metadata:
+    vulnerability_id: V-223807
+    rule_id: SV-223807r1083014_rule
+    rule_version: RACF-SH-000020
+    check_id: C-25480r1083013_chk
+    fix_id: F-25468r1082847_fix
+    cci: CCI-000068
+    documentable: 'false'
+    coverage: MANUAL
+    evidence_note: Collect the active sshd_config and zos_sshd_config files plus evidence of whether the
+      SSH daemon is running.
+- control_id: STIG-V-223810
+  title: IBM z/OS SSH daemon must be configured to only use the SSHv2 protocol.
+  severity: high
+  requirement: |-
+    Discussion:
+    In order to prevent unauthorized connection of devices, unauthorized transfer of information, or unauthorized tunneling (i.e., embedding of data types within data types), organizations must disable or restrict unused or unnecessary physical and logical ports/protocols on information systems.
+
+    Operating systems are capable of providing a wide variety of functions and services. Some of the functions and services provided by default may not be necessary to support essential organizational operations. Additionally, it is sometimes convenient to provide multiple services from a single component (e.g., VPN and IPS); however, doing so increases risk over limiting the services provided by any one component.
+
+    To support the requirements and principles of least functionality, the operating system must support the organizational requirements, providing only essential capabilities and limiting the use of ports, protocols, and/or services to only those required, authorized, and approved to conduct official business or to address authorized quality of life issues.
+
+    Check procedure:
+    Locate the SSH daemon configuration file, which may be found in /etc/ssh/ directory.
+
+    Alternately:
+    From UNIX System Services ISPF Shell navigate to ribbon select tools.
+    Select option 1 - Work with Processes.
+
+    If SSH Daemon is not active, this is not a finding.
+
+    Examine SSH daemon configuration file. If the variables "Protocol 2,1" or "Protocol 1" are defined on a line without a leading comment, this is a finding.
+  stig:
+    rule_id: SV-223810r958480_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-SH-000050
+    reference: V-223810 | SV-223810r958480_rule | CCI-000382
+  data_sources_needed: []
+  implementation:
+    engine: python
+    dataset: ''
+    logic: |
+      status = 'REVIEW'
+      detail = 'Additional evidence required for V-223810: Collect the active sshd_config file plus evidence of whether the SSH daemon is running.'
+      findings = []
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: Edit the sshd_config file and set the "Protocol" setting to "2".
+  source_metadata:
+    vulnerability_id: V-223810
+    rule_id: SV-223810r958480_rule
+    rule_version: RACF-SH-000050
+    check_id: C-25483r515118_chk
+    fix_id: F-25471r515119_fix
+    cci: CCI-000382
+    documentable: 'false'
+    coverage: MANUAL
+    evidence_note: Collect the active sshd_config file plus evidence of whether the SSH daemon is running.
+- control_id: STIG-V-223838
+  title: The IBM z/OS UNIX SUPERUSER resources must be protected in accordance with guidelines.
+  severity: high
+  requirement: |-
+    Discussion:
+    To mitigate the risk of unauthorized access to sensitive information by entities that have been issued certificates by DoD-approved PKIs, all DoD systems (e.g., web servers and web portals) must be properly configured to incorporate access control methods that do not rely solely on the possession of a certificate for access. Successful authentication must not automatically give an entity access to an asset or security boundary. Authorization procedures and controls must be implemented to ensure each authenticated entity also has a validated and current authorization. Authorization is the process of determining whether an entity, once authenticated, is permitted to access a specific asset. Information systems use access control policies and enforcement mechanisms to implement this requirement.
+
+    Access control policies include: identity-based policies, role-based policies, and attribute-based policies. Access enforcement mechanisms include: access control lists, access control matrices, and cryptography. These policies and mechanisms must be employed by the application to control access between users (or processes acting on behalf of users) and objects (e.g., devices, files, records, processes, programs, and domains) in the information system.
+
+    Check procedure:
+    From the ISPF Command Shell enter:
+    RL UNIXPRIV * AUTHUSER
+
+    If the RACF rules for the SUPERUSER resource specify a default access of NONE, this is not a finding.
+
+    If there are no RACF rules that allow access to the SUPERUSER resource, this is not a finding.
+
+    If there is no RACF rule for CHOWN.UNRESTRICTED defined, this is not a finding.
+
+    If the RACF rules for each of the SUPERUSER resources listed in the z/OS UNIX System Services Planning, Establishing UNIX security, specify a default access of NONE, this is not a finding.
+
+    If the RACF rules for each of the SUPERUSER resources listed in the z/OS UNIX System Services Planning, Establishing UNIX security, restrict access to appropriate system tasks or systems programming personnel, this is not a finding.
+  stig:
+    rule_id: SV-223838r1137691_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-US-000010
+    reference: V-223838 | SV-223838r1137691_rule | CCI-000213
+  data_sources_needed:
+  - irrdbu00
+  implementation:
+    engine: python
+    dataset: irrdbu00.generals
+    logic: |
+      user_ids = set(irrdbu00.users['USBD_NAME'].astype(str).str.upper())
+      group_ids = set(irrdbu00.groups['GPBD_NAME'].astype(str).str.upper())
+
+      def auth_type(value):
+          auth_id = str(value).upper()
+          if auth_id in user_ids:
+              return 'USER'
+          if auth_id in group_ids:
+              return 'GROUP'
+          return 'UNRESOLVED'
+
+      profiles = irrdbu00.generals[
+          (irrdbu00.generals['GRBD_CLASS_NAME'] == 'UNIXPRIV') &
+          (
+              irrdbu00.generals['GRBD_NAME'].str.startswith('SUPERUSER', na=False) |
+              (irrdbu00.generals['GRBD_NAME'] == 'CHOWN.UNRESTRICTED')
+          )
+      ].copy()
+      access = irrdbu00.generalAccess[
+          (irrdbu00.generalAccess['GRACC_CLASS_NAME'] == 'UNIXPRIV') &
+          (
+              irrdbu00.generalAccess['GRACC_NAME'].str.startswith('SUPERUSER', na=False) |
+              (irrdbu00.generalAccess['GRACC_NAME'] == 'CHOWN.UNRESTRICTED')
+          )
+      ].copy()
+      bad_uacc = profiles[profiles['GRBD_UACC'] != 'NONE']
+      findings = [
+          {
+              'GRBD_NAME': row['GRBD_NAME'], 'GRBD_UACC': row['GRBD_UACC'],
+              'GRACC_AUTH_ID': '', 'AUTH_TYPE': '', 'GRACC_ACCESS': ''
+          }
+          for _, row in bad_uacc.iterrows()
+      ]
+      findings.extend([
+          {
+              'GRBD_NAME': row['GRACC_NAME'], 'GRBD_UACC': 'NONE',
+              'GRACC_AUTH_ID': row['GRACC_AUTH_ID'],
+              'AUTH_TYPE': auth_type(row['GRACC_AUTH_ID']),
+              'GRACC_ACCESS': row['GRACC_ACCESS']
+          }
+          for _, row in access.iterrows()
+      ])
+      if len(bad_uacc):
+          status = 'FAIL'
+          detail = f'{len(bad_uacc)} SUPERUSER/CHOWN profile(s) have UACC other than NONE'
+      elif len(access):
+          status = 'REVIEW'
+          detail = (
+              f'All relevant UNIXPRIV profiles have UACC NONE; validate '
+              f'{len(access)} explicit permit(s) as authorized system tasks or users'
+          )
+      else:
+          status = 'PASS'
+          detail = 'No unrestricted SUPERUSER/CHOWN access was found'
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    Configure all SUPERUSER resources for the UNIXPRIV resource class to be restricted to appropriate system tasks and/or system programming personnel.
+
+    -The RACF rules for the SUPERUSER resource specify a default access of NONE.
+    -There are no RACF rules that allow access to the SUPERUSER resource.
+    -There is no RACF rule for CHOWN.UNRESTRICTED defined.
+    -The RACF rules for each of the SUPERUSER resources listed in the z/OS UNIX System Services Planning, Establishing UNIX security, specify a default access of NONE.
+    -The RACF rules for each of the SUPERUSER resources listed in the z/OS UNIX System Services Planning, Establishing UNIX security, restrict access to appropriate system tasks or systems programming personnel.
+
+    Sample Commands:
+    RDEF UNIXPRIV SUPERUSER.** UACC(NONE) OWNER(ADMIN) DATA('REFERENCE ZUSS0023') AUDIT(ALL(READ))
+    /* do not permit any users/groups to this resource */
+
+    SR CLASS(UNIXPRIV) MASK(CHOWN.UNRESTRICTED)
+    /* delete if found */
+
+    PE SUPERUSER.FILESYS.** CL(UNIXPRIV) ID(<SYSPsmpl>)
+  source_metadata:
+    vulnerability_id: V-223838
+    rule_id: SV-223838r1137691_rule
+    rule_version: RACF-US-000010
+    check_id: C-25511r515202_chk
+    fix_id: F-25499r515203_fix
+    cci: CCI-000213
+    documentable: 'false'
+    coverage: HYBRID
+    evidence_note: UNIXPRIV UACC is automated; explicit permit holders require validation as appropriate
+      system tasks or users.
+- control_id: STIG-V-223837
+  title: IBM RACF LOGONIDs must not be defined to SYS1.UADS for non-emergency use.
+  severity: high
+  requirement: |-
+    Discussion:
+    Privileged functions include, for example, establishing accounts, performing system integrity checks, or administering cryptographic key management activities. Non-privileged users are individuals that do not possess appropriate authorizations. Circumventing intrusion detection and prevention mechanisms or malicious code protection mechanisms are examples of privileged functions that require protection from non-privileged users.
+
+    Check procedure:
+    Ask the system administrator to provide a list of all emergency userids available to the site along with the associated function of each.
+
+     If SYS1.UADS userids are limited and reserved for emergency purposes only, this is not a finding.
+  stig:
+    rule_id: SV-223837r958726_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-TS-000020
+    reference: V-223837 | SV-223837r958726_rule | CCI-002235
+  data_sources_needed: []
+  implementation:
+    engine: python
+    dataset: ''
+    logic: |
+      status = 'REVIEW'
+      detail = 'Additional evidence required for V-223837: Collect the SYS1.UADS user-ID inventory and the approved emergency-ID register. IRRDBU00 contains RACF users, not UADS accounts.'
+      findings = []
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: Configure the SYS1.UADS entries to ensure LOGONIDs defined include only those users required
+    to support specific functions related to system recovery. Evaluate the impact of accomplishing the
+    change.
+  source_metadata:
+    vulnerability_id: V-223837
+    rule_id: SV-223837r958726_rule
+    rule_version: RACF-TS-000020
+    check_id: C-25510r515199_chk
+    fix_id: F-25498r515200_fix
+    cci: CCI-002235
+    documentable: 'false'
+    coverage: MANUAL
+    evidence_note: Collect the SYS1.UADS user-ID inventory and the approved emergency-ID register. IRRDBU00
+      contains RACF users, not UADS accounts.
+- control_id: STIG-V-223856
+  title: IBM z/OS UID(0) must be properly assigned.
+  severity: high
+  requirement: |-
+    Discussion:
+    To assure accountability and prevent unauthenticated access, organizational users must be identified and authenticated to prevent potential misuse and compromise of the system.
+
+    Organizational users include organizational employees or individuals the organization deems to have equivalent status of employees (e.g., contractors). Organizational users (and processes acting on behalf of users) must be uniquely identified and authenticated to all accesses, except for the following:
+
+    1) Accesses explicitly identified and documented by the organization. Organizations document specific user actions that can be performed on the information system without identification or authentication; and
+
+    2) Accesses that occur through authorized use of group authenticators without individual authentication. Organizations may require unique identification of individuals in group accounts (e.g., shared privilege accounts) or for detailed accountability of individual activity.
+
+    Check procedure:
+    From a z/OS command screen enter:
+    SR CLASS(USER) UID(0)
+
+     If UID(0) is assigned only to system tasks such as the z/OS/ UNIX kernel (i.e., OMVS), z/OS UNIX daemons (e.g., inetd, syslogd, ftpd), and other system software daemons, this is not a finding.
+
+     If UID(0) is assigned to security administrators who create or maintain user account definitions; and to systems programming accounts dedicated to maintenance (e.g., SMP/E) of HFS-based components, this not a finding.
+
+    NOTE: The assignment of UID(0) confers full time superuser privileges. This is not appropriate for personal user accounts. Access to the BPX.SUPERUSER resource is used to allow personal user accounts to gain short-term access to superuser privileges.
+
+     If UID(0) is assigned to non-systems or non-maintenance accounts, this is a finding.
+  stig:
+    rule_id: SV-223856r958482_rule
+    severity: high
+  custom:
+    benchmark: IBM z/OS RACF Security Technical Implementation Guide V9R8
+    category: RACF-US-000190
+    reference: V-223856 | SV-223856r958482_rule | CCI-000764
+  data_sources_needed:
+  - irrdbu00
+  implementation:
+    engine: python
+    dataset: irrdbu00.userOMVS
+    logic: |
+      omvs = irrdbu00.userOMVS.copy()
+      uid0 = omvs[
+          omvs['USOMVS_UID'].fillna('').astype(str).str.fullmatch(r'0+')
+      ].copy()
+      uid0 = uid0.merge(
+          irrdbu00.users[
+              [
+                  'USBD_NAME', 'USBD_SPECIAL', 'USBD_OPER',
+                  'USBD_REVOKE', 'USBD_NOPWD'
+              ]
+          ],
+          left_on='USOMVS_NAME',
+          right_on='USBD_NAME',
+          how='left'
+      )
+      findings = uid0[
+          [
+              'USOMVS_NAME', 'USOMVS_UID', 'USBD_SPECIAL',
+              'USBD_OPER', 'USBD_REVOKE', 'USBD_NOPWD'
+          ]
+      ].sort_values('USOMVS_NAME').to_dict('records')
+      count = len(uid0)
+      status = 'PASS' if count == 0 else 'REVIEW'
+      detail = (
+          'No UID(0) assignments found' if count == 0 else
+          f'Validate {count} UID(0) assignment(s) against approved system-task, '
+          'security-administration, and system-programming roles'
+      )
+  assertion:
+    type: python_result
+    pass_message: STIG requirement satisfied
+    fail_message: STIG requirement not satisfied
+  remediation: |-
+    Assign UID(0) as specified below:
+    UID(0) is assigned only to system tasks such as the z/OS UNIX kernel (i.e., OMVS), z/OS UNIX daemons (e.g., inetd, syslogd, ftpd), and other system software daemons.
+
+    UID(0) is assigned to security administrators who create or maintain user account definitions; and to systems programming accounts dedicated to maintenance (e.g., SMP/E) of HFS-based components.
+
+    NOTE: The assignment of UID(0) confers full time superuser privileges, this is not appropriate for personal user accounts. Access to the BPX.SUPERUSER resource is used to allow personal user accounts to gain short-term access to superuser privileges.
+  source_metadata:
+    vulnerability_id: V-223856
+    rule_id: SV-223856r958482_rule
+    rule_version: RACF-US-000190
+    check_id: C-25529r621705_chk
+    fix_id: F-25517r515257_fix
+    cci: CCI-000764
+    documentable: 'false'
+    coverage: HYBRID
+    evidence_note: UID(0) assignments are enumerated automatically; organizational role appropriateness
+      requires review.

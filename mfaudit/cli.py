@@ -61,6 +61,7 @@ import csv
 import json
 import os
 import platform
+import re
 import sys
 import time
 import traceback
@@ -102,11 +103,32 @@ def parse_args():
         description="MFAudit – RACF CIS Benchmark Audit Report Generator"
     )
     p.add_argument("--setropts",     required=False, metavar="FILE", default="SETROPTS",
-                   help="REXX-produced SETROPTS export (KEY:VALUE lines) [default: ./SETROPTS]")
+                   help="SETROPTS data: either the REXX-produced KEY:VALUE export or raw "
+                        "'SETROPTS LIST' console/spool output (auto-detected) [default: ./SETROPTS]")
     p.add_argument("--irrdbu00",     required=False, metavar="FILE", default="IRRDBU00",
                    help="IRRDBU00 unload file [default: ./IRRDBU00]")
     p.add_argument("--dcollect",     required=False, metavar="FILE", default=None,
                    help="DCOLLECT unload file (optional)")
+    p.add_argument("--apf-list",     required=False, metavar="FILE", default=None,
+                   help="active APF-authorized libraries, one data set per line (optional)")
+    p.add_argument("--parmlib-list", required=False, metavar="FILE", default=None,
+                   help="active PARMLIB concatenation, one data set per line (optional)")
+    p.add_argument("--proclib-list", required=False, metavar="FILE", default=None,
+                   help="active STC/TSO PROCLIB libraries, one data set per line (optional)")
+    p.add_argument("--lpa-list",     required=False, metavar="FILE", default=None,
+                   help="active LPA concatenation libraries, one data set per line (optional)")
+    p.add_argument("--master-catalog", required=False, metavar="FILE", default=None,
+                   help="master catalog data set name(s), one per line (optional)")
+    p.add_argument("--racf-db-list", required=False, metavar="FILE", default=None,
+                   help="RACF primary/backup database data sets, one per line (optional)")
+    p.add_argument("--sysprog-list", required=False, metavar="FILE", default=None,
+                   help="approved system-programmer user/group IDs, one per line (optional). "
+                        "Writer-review controls treat WRITE access held only by these IDs as "
+                        "resolved (PASS) instead of REVIEW.")
+    p.add_argument("--inventory",    required=False, metavar="FILE", default=None,
+                   help="YAML runtime-inventory file supplying any of the optional lists in one "
+                        "place: apf, parmlib, proclib, lpa, master_catalog, racf_db, sysprog. "
+                        "An explicit per-list flag (e.g. --apf-list) overrides its inventory section.")
     p.add_argument("--controls",     required=False, metavar="FILE", nargs="+",
                    help="Controls definition file(s); repeat or space-separate to merge multiple YAML files. "
                         "Defaults to the bundled controls when omitted. "
@@ -309,13 +331,27 @@ def anonymize_results(results: list, irrdbu00=None) -> list:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def load_setropts(path):
-    """Load and return a parsed SETROPTS object, or None."""
+    """Load and return a parsed SETROPTS object, or None.
+
+    Accepts either input format transparently:
+      * the REXX/IRRXUTIL ``KEY:VALUE`` export (the historical format), or
+      * raw ``SETROPTS LIST`` console/spool output, which is converted on the
+        fly via ``SETROPTS.from_setropts_list``.
+
+    Detection is by content: the converter raises ``ValueError`` when the file
+    is not a ``SETROPTS LIST`` report, in which case we fall back to the
+    ``KEY:VALUE`` parser. Existing exports therefore behave exactly as before.
+    """
     if not path:
         return None
     from mfpandas import SETROPTS
     print(f"[+] Loading SETROPTS from {path}")
-    s = SETROPTS(setropts=path)
-    return s
+    try:
+        s = SETROPTS.from_setropts_list(path)
+        print("    detected raw SETROPTS LIST output; converted to key/value")
+        return s
+    except ValueError:
+        return SETROPTS(setropts=path)
 
 
 def load_irrdbu00(path):
@@ -367,7 +403,115 @@ def load_dcollect(path):
     d.parse()
     while d.status["status"] not in ("Ready", "Error"):
         time.sleep(0.3)
+    if d.status["status"] == "Error":
+        raise RuntimeError(f"DCOLLECT parsing failed: {d.status.get('error', 'unknown error')}")
     return d
+
+
+def _normalize_dsn(raw):
+    """Normalise a data set name from SDSF/ISRDDN output.
+
+    A data set name has no spaces; SDSF/ISRDDN column wrapping inserts spaces
+    either after a qualifier's period or in place of one. Treat any run of
+    whitespace as a qualifier boundary (period), collapse repeats, and trim
+    stray edge punctuation. e.g. 'A. B' -> 'A.B' and 'A.B C' -> 'A.B.C'.
+    """
+    s = re.sub(r"\s+", ".", str(raw).strip())
+    s = re.sub(r"\.{2,}", ".", s)
+    return s.strip(".,").upper()
+
+
+def _normalize_id(raw):
+    """Normalise a RACF user/group ID (no spaces or periods)."""
+    return "".join(str(raw).split()).upper()
+
+
+def _clean_entries(lines, normalize):
+    """Filter comment/blank lines and normalise, deduped and sorted."""
+    return sorted({
+        normalize(line)
+        for line in lines
+        if str(line).strip() and not str(line).lstrip().startswith(("#", "*"))
+    })
+
+
+def load_library_list(path, label):
+    """Load a one-data-set-per-line runtime library inventory, or None."""
+    if not path:
+        return None
+    lines = Path(path).read_text(encoding="utf-8-sig").splitlines()
+    libraries = _clean_entries(lines, _normalize_dsn)
+    print(f"[+] Loaded {len(libraries)} {label} libraries from {path}")
+    return libraries
+
+
+def load_apf_list(path):
+    return load_library_list(path, "APF-authorized")
+
+
+def load_parmlib_list(path):
+    return load_library_list(path, "PARMLIB")
+
+
+def load_proclib_list(path):
+    return load_library_list(path, "PROCLIB")
+
+
+def load_sysprog_list(path):
+    """Load approved system-programmer user/group IDs, or None."""
+    if not path:
+        return None
+    lines = Path(path).read_text(encoding="utf-8-sig").splitlines()
+    ids = _clean_entries(lines, _normalize_id)
+    print(f"[+] Loaded {len(ids)} approved system-programmer ID(s) from {path}")
+    return ids
+
+
+# Optional runtime lists exposed to control logic. Each entry:
+#   (namespace key used in control logic, inventory-file section, per-list CLI
+#    argument attribute or None, human label). Controls that declare the
+#    namespace key in data_sources_needed SKIP when the list is not supplied.
+_LIST_INPUTS = [
+    ("apf_list",       "apf",            "apf_list",       "APF-authorized"),
+    ("parmlib_list",   "parmlib",        "parmlib_list",   "PARMLIB"),
+    ("proclib_list",   "proclib",        "proclib_list",   "PROCLIB"),
+    ("lpa_list",       "lpa",            "lpa_list",       "LPA"),
+    ("mastercat_list", "master_catalog", "master_catalog", "master catalog"),
+    ("racfdb_list",    "racf_db",        "racf_db_list",   "RACF database"),
+]
+
+
+def load_inventory(path):
+    """Load the optional YAML runtime-inventory file into a dict, or {}."""
+    if not path:
+        return {}
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8-sig")) or {}
+    if not isinstance(raw, dict):
+        print("[!] --inventory file must be a YAML mapping of list names to lists",
+              file=sys.stderr)
+        sys.exit(1)
+    known = {inv_key for _, inv_key, _, _ in _LIST_INPUTS} | {"sysprog"}
+    for key in raw:
+        if key not in known:
+            print(f"[!] Ignoring unknown --inventory section: {key!r} "
+                  f"(known: {', '.join(sorted(known))})", file=sys.stderr)
+    return raw
+
+
+def resolve_list_inputs(args, inventory):
+    """Merge per-list flags (override) with inventory sections into a dict."""
+    resolved = {}
+    for ns_key, inv_key, arg_attr, label in _LIST_INPUTS:
+        path = getattr(args, arg_attr) if arg_attr else None
+        if path:
+            resolved[ns_key] = load_library_list(path, label)
+        elif inventory.get(inv_key):
+            vals = _clean_entries(inventory[inv_key], _normalize_dsn)
+            print(f"[+] Loaded {len(vals)} {label} entr(ies) from inventory")
+            resolved[ns_key] = vals
+        else:
+            resolved[ns_key] = None
+    return resolved
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -466,7 +610,10 @@ def run_pandas_query(control, impl, setropts, irrdbu00, dcollect):
     return STATUS_SKIP, "Unhandled assertion type", []
 
 
-def run_python_control(control, impl, setropts, irrdbu00, dcollect):
+def run_python_control(
+    control, impl, setropts, irrdbu00, dcollect,
+    list_inputs, sysprog_list,
+):
     """Execute inline Python logic defined in controls.yaml."""
     dataset_spec = impl.get("dataset", "")
     logic = impl.get("logic", "")
@@ -477,11 +624,13 @@ def run_python_control(control, impl, setropts, irrdbu00, dcollect):
         "setropts": setropts,
         "irrdbu00": irrdbu00,
         "dcollect": dcollect,
+        "sysprog_list": sysprog_list,
         "status": STATUS_SKIP,
         "detail": "",
         "findings": [],
         "count": 0,
     }
+    ns.update(list_inputs)  # apf_list, parmlib_list, proclib_list, lpa_list, ...
 
     # Support combined specs like "irrdbu00.userOMVS + irrdbu00.users"
     specs = [s.strip() for s in dataset_spec.split("+")]
@@ -514,6 +663,9 @@ def run_python_control(control, impl, setropts, irrdbu00, dcollect):
             return STATUS_SKIP, "SETROPTS data not provided", []
         if "irrdbu00" in required and irrdbu00 is None:
             return STATUS_SKIP, "IRRDBU00 data not provided", []
+        for ns_key, _, _, label in _LIST_INPUTS:
+            if ns_key in required and list_inputs.get(ns_key) is None:
+                return STATUS_SKIP, f"{label} list not provided", []
 
     try:
         exec(logic, ns)
@@ -523,8 +675,12 @@ def run_python_control(control, impl, setropts, irrdbu00, dcollect):
     return ns.get("status", STATUS_SKIP), ns.get("detail", ""), ns.get("findings", [])
 
 
-def run_control(control, setropts, irrdbu00, dcollect):
+def run_control(
+    control, setropts, irrdbu00, dcollect,
+    list_inputs=None, sysprog_list=None,
+):
     """Dispatch and execute a single control. Returns (status, detail, findings)."""
+    list_inputs = list_inputs or {}
     impl = control.get("implementation", {})
     engine = impl.get("engine", "pandas_query")
     needed = control.get("data_sources_needed", [])
@@ -536,11 +692,18 @@ def run_control(control, setropts, irrdbu00, dcollect):
         return STATUS_SKIP, "IRRDBU00 not provided (use --irrdbu00)", []
     if "dcollect" in needed and dcollect is None:
         return STATUS_SKIP, "DCOLLECT not provided (use --dcollect)", []
+    for ns_key, inv_key, arg_attr, label in _LIST_INPUTS:
+        if ns_key in needed and list_inputs.get(ns_key) is None:
+            flag = f"--{arg_attr.replace('_', '-')}" if arg_attr else "--inventory"
+            return STATUS_SKIP, f"{label} list not provided (use {flag})", []
 
     if engine == "pandas_query":
         return run_pandas_query(control, impl, setropts, irrdbu00, dcollect)
     elif engine == "python":
-        return run_python_control(control, impl, setropts, irrdbu00, dcollect)
+        return run_python_control(
+            control, impl, setropts, irrdbu00, dcollect,
+            list_inputs, sysprog_list,
+        )
     else:
         return STATUS_SKIP, f"Unknown engine: {engine}", []
 
@@ -631,11 +794,54 @@ def render_report(results, system_name, report_date, out_dir, controls_path,
                 # Embed CSS inline so xhtml2pdf can find it (it doesn't follow relative links)
                 css_inline = ""
                 if css_path.exists():
-                    css_inline = f"<style>{css_path.read_text(encoding='utf-8')}</style>"
+                    css_for_xhtml = css_path.read_text(encoding="utf-8")
+                    # xhtml2pdf 0.2.17 cannot parse CSS page-margin at-rules
+                    # such as @bottom-center nested inside @page. Its parser
+                    # returns NotImplemented and then raises TypeError while
+                    # trying to iterate that value. The footer is decorative,
+                    # so omit unsupported margin-box rules in the fallback.
+                    css_for_xhtml = re.sub(
+                        r"@(?:top|bottom)-(?:left|center|right)\s*\{[^{}]*\}",
+                        "",
+                        css_for_xhtml,
+                        flags=re.IGNORECASE | re.DOTALL,
+                    )
+                    # xhtml2pdf also lacks support for CSS custom properties.
+                    # Resolve var(--name) references from the :root block.
+                    css_variables = dict(
+                        re.findall(
+                            r"--([\w-]+)\s*:\s*([^;{}]+);",
+                            css_for_xhtml,
+                        )
+                    )
+                    css_for_xhtml = re.sub(
+                        r"var\(\s*--([\w-]+)\s*\)",
+                        lambda match: css_variables.get(match.group(1), match.group(0)),
+                        css_for_xhtml,
+                    )
+                    css_for_xhtml = re.sub(
+                        r":root\s*\{[^{}]*\}", "", css_for_xhtml, flags=re.DOTALL
+                    )
+                    # xhtml2pdf emits getSize warnings for relative
+                    # letter-spacing lengths. They are decorative, so omit them.
+                    css_for_xhtml = re.sub(
+                        r"letter-spacing\s*:\s*[-+]?(?:\d*\.)?\d+em\s*;",
+                        "",
+                        css_for_xhtml,
+                        flags=re.IGNORECASE,
+                    )
+                    css_inline = f"<style>{css_for_xhtml}</style>"
                 html_for_xhtml = html.replace(
                     '<link rel="stylesheet" href="../assets/report.css">',
                     css_inline,
                 )
+                # The default report uses modern grid/inline-block styling
+                # which xhtml2pdf renders poorly. Use a CSS-2/table-based
+                # template for this fallback engine only. Custom templates
+                # retain the compatibility sanitization above.
+                if not template_path:
+                    fallback = env.get_template("xhtml2pdf-report.html.j2")
+                    html_for_xhtml = fallback.render(**context)
                 with open(pdf_path, "wb") as pdf_fh:
                     result = pisa.CreatePDF(html_for_xhtml, dest=pdf_fh)
                 if result.err:
@@ -681,6 +887,31 @@ def render_report(results, system_name, report_date, out_dir, controls_path,
 
         print(f"[+] CSV results written to {csv_path}")
 
+        # Preserve complete finding rows in a separate machine-readable CSV.
+        finding_columns = sorted({
+            key
+            for result in results
+            for finding in result.get("findings", [])
+            for key in finding
+            if key not in {"control_id", "status"}
+        })
+        findings_path = Path(out_dir) / "control_findings.csv"
+        finding_fields = ["control_id", "status"] + finding_columns
+        with open(findings_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(
+                fh, fieldnames=finding_fields, extrasaction="ignore"
+            )
+            writer.writeheader()
+            for result in results:
+                for finding in result.get("findings", []):
+                    row = {
+                        "control_id": result.get("control_id", ""),
+                        "status": result.get("status", ""),
+                    }
+                    row.update(finding)
+                    writer.writerow(row)
+        print(f"[+] Detailed findings written to {findings_path}")
+
     # JSON
     if "JSON" in formats:
         json_path = Path(out_dir) / "controls_results.json"
@@ -697,6 +928,7 @@ def render_report(results, system_name, report_date, out_dir, controls_path,
                 "detail": r.get("detail", ""),
                 "data_sources": r.get("data_sources_needed", []),
                 "stig_rule_id": r.get("stig_rule_id", ""),
+                "findings": r.get("findings", []),
             })
 
         with open(json_path, "w", encoding="utf-8") as fh:
@@ -832,6 +1064,26 @@ def main():
         print(f"[!] DCOLLECT file not found: {args.dcollect}", file=sys.stderr)
         sys.exit(1)
 
+    if args.apf_list and not Path(args.apf_list).exists():
+        print(f"[!] APF list file not found: {args.apf_list}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.parmlib_list and not Path(args.parmlib_list).exists():
+        print(f"[!] PARMLIB list file not found: {args.parmlib_list}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.proclib_list and not Path(args.proclib_list).exists():
+        print(f"[!] PROCLIB list file not found: {args.proclib_list}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.sysprog_list and not Path(args.sysprog_list).exists():
+        print(f"[!] System-programmer list file not found: {args.sysprog_list}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.inventory and not Path(args.inventory).exists():
+        print(f"[!] Inventory file not found: {args.inventory}", file=sys.stderr)
+        sys.exit(1)
+
     if args.template:
         args.template = str(_resolve_template(args.template))
 
@@ -848,6 +1100,17 @@ def main():
     setropts = load_setropts(args.setropts)
     irrdbu00 = load_irrdbu00(args.irrdbu00)
     dcollect = load_dcollect(args.dcollect)
+
+    # Optional runtime lists: per-list flag overrides its --inventory section.
+    inventory = load_inventory(args.inventory)
+    list_inputs = resolve_list_inputs(args, inventory)
+    if args.sysprog_list:
+        sysprog_list = load_sysprog_list(args.sysprog_list)
+    elif inventory.get("sysprog"):
+        sysprog_list = _clean_entries(inventory["sysprog"], _normalize_id)
+        print(f"[+] Loaded {len(sysprog_list)} approved system-programmer ID(s) from inventory")
+    else:
+        sysprog_list = None
 
     # Load and merge controls from all files
     controls = []
@@ -867,7 +1130,10 @@ def main():
         print(f"  [{cid}] {title[:70]}", end=" ... ", flush=True)
 
         try:
-            status, detail, findings = run_control(ctrl, setropts, irrdbu00, dcollect)
+            status, detail, findings = run_control(
+                ctrl, setropts, irrdbu00, dcollect,
+                list_inputs, sysprog_list,
+            )
         except Exception as exc:
             status  = STATUS_ERROR
             detail  = str(exc)

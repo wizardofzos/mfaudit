@@ -544,6 +544,465 @@ controls:
       Issue: SETROPTS CLASSACT(TEMPDSN)
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # SECTION 2.1 – DATA PROTECTION (runtime library write-access additions)
+  # APF / PARMLIB / PROCLIB write-access review. Require --apf-list /
+  # --parmlib-list / --proclib-list respectively; SKIP when not supplied.
+  # Optional --sysprog-list auto-resolves (PASS) when writers are all approved.
+  # Cross-reference STIG V-223682 / V-223697 / V-223687.
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  - control_id: CIS-2.1.8
+    title: Ensure WRITE or greater access to APF-authorized libraries is limited to systems programmers
+    cis:
+      section: 2.1.8
+      level: L1
+      benchmark: CIS z/OS 2.5.0
+    stig:
+      rule_id: V-223682
+      severity: high
+    data_sources_needed:
+    - irrdbu00
+    - apf_list
+    implementation:
+      engine: python
+      dataset: irrdbu00.datasets
+      logic: |
+        import re
+
+        libraries = apf_list
+        ranks = {'NONE': 0, 'EXECUTE': 1, 'READ': 2, 'UPDATE': 3, 'CONTROL': 4, 'ALTER': 5}
+        audit_required = True
+        required_audit_threshold = 'UPDATE'
+        user_ids = set(irrdbu00.users['USBD_NAME'].astype(str).str.upper())
+        group_ids = set(irrdbu00.groups['GPBD_NAME'].astype(str).str.upper())
+        all_profiles = irrdbu00.datasets
+        all_access = irrdbu00.datasetAccess
+
+        def auth_type(value):
+            auth_id = str(value).upper()
+            if auth_id in user_ids:
+                return 'USER'
+            if auth_id in group_ids:
+                return 'GROUP'
+            return 'UNRESOLVED'
+
+        def matches(pattern, value):
+            expression = re.escape(str(pattern))
+            expression = expression.replace(r'\*\*', '.*')
+            expression = expression.replace(r'\*', '[^.]*').replace('%', '[^.]')
+            return re.fullmatch(expression, value) is not None
+
+        hard_issues = []
+        review_access = {}
+        for library in libraries:
+            profiles = all_profiles[all_profiles['DSBD_NAME'] == library].copy()
+            if profiles.empty:
+                candidates = all_profiles[
+                    all_profiles['DSBD_NAME'].map(
+                        lambda pattern: matches(pattern, library)
+                    )
+                ].copy()
+                if not candidates.empty:
+                    candidates['_specificity'] = candidates['DSBD_NAME'].str.replace(
+                        '*', '', regex=False
+                    ).str.replace('%', '', regex=False).str.len()
+                    best = candidates['_specificity'].max()
+                    profiles = candidates[candidates['_specificity'] == best].copy()
+
+            if profiles.empty:
+                hard_issues.append(f'{library}: no covering RACF profile')
+                continue
+
+            for _, profile in profiles.iterrows():
+                uacc = str(profile['DSBD_UACC']).upper()
+                level = str(profile['DSBD_AUDIT_LEVEL']).upper()
+                okqual = str(profile['DSBD_AUDIT_OKQUAL']).upper()
+                if ranks.get(uacc, 99) > ranks['READ']:
+                    hard_issues.append(f'{library}: UACC={uacc}')
+                if audit_required and not (
+                    level == 'ALL' and
+                    ranks.get(okqual, 99) <= ranks[required_audit_threshold]
+                ):
+                    hard_issues.append(
+                        f'{library}: AUDIT={level}({okqual or "NONE"})'
+                    )
+
+                related = all_access[
+                    (all_access['DSACC_NAME'] == profile['DSBD_NAME']) &
+                    (
+                        all_access['DSACC_ACCESS'].map(
+                            lambda value: ranks.get(str(value).upper(), -1)
+                        ) >= ranks['UPDATE']
+                    )
+                ]
+                for _, permit in related.iterrows():
+                    auth_id = str(permit['DSACC_AUTH_ID']).upper()
+                    access = str(permit['DSACC_ACCESS']).upper()
+                    item = review_access.setdefault(auth_id, {
+                        'auth_type': auth_type(auth_id),
+                        'max_access': access,
+                        'libraries': set(),
+                    })
+                    if ranks.get(access, -1) > ranks.get(item['max_access'], -1):
+                        item['max_access'] = access
+                    item['libraries'].add(library)
+
+        sysprog = {str(x).upper() for x in sysprog_list} if sysprog_list else None
+
+        def _approved(auth_id):
+            if sysprog is None:
+                return 'UNREVIEWED'
+            return 'YES' if str(auth_id).upper() in sysprog else 'NO'
+
+        findings = [
+            {
+                'AUTH_ID': auth_id,
+                'AUTH_TYPE': item['auth_type'],
+                'MAX_ACCESS': item['max_access'],
+                'LIBRARY_COUNT': len(item['libraries']),
+                'LIBRARIES': ', '.join(sorted(item['libraries'])),
+                'APPROVED': _approved(auth_id),
+            }
+            for auth_id, item in sorted(review_access.items())
+        ]
+        unapproved = [f for f in findings if f['APPROVED'] != 'YES']
+
+        hard_issues = sorted(set(hard_issues))
+        if hard_issues:
+            status = 'REVIEW'
+            detail = (
+                f'{len(hard_issues)} APF library protection issue(s): ' +
+                '; '.join(hard_issues[:10]) +
+                ('; ...' if len(hard_issues) > 10 else '') +
+                f'; {len(unapproved)} unique UPDATE-or-greater '
+                'user/group ID(s) require validation'
+            )
+        elif unapproved:
+            status = 'REVIEW'
+            detail = (
+                f'APF library profile settings meet technical thresholds; validate '
+                f'{len(unapproved)} unique UPDATE-or-greater '
+                'user/group ID(s) not in the system-programmer list'
+            )
+        elif findings:
+            status = 'PASS'
+            detail = (
+                f'APF library write access is limited to {len(findings)} approved '
+                'system-programmer ID(s)'
+            )
+        else:
+            status = 'PASS'
+            detail = f'All {len(libraries)} APF library entries meet the technical thresholds'
+      assertion:
+        type: python_result
+        pass_message: All APF libraries restrict WRITE-or-greater access appropriately
+        fail_message: APF library protection issues or unreviewed WRITE-or-greater access found
+    remediation: For each APF data set flagged, restrict WRITE (UPDATE) or greater access to systems programming
+      personnel only, set UACC(READ) or lower, define a covering RACF data set profile where missing and
+      enable AUDIT(ALL(UPDATE)). Review each listed user/group ID against approved roles and remove access
+      that is not justified.
+  - control_id: CIS-2.1.9
+    title: Ensure WRITE or greater access to SYS1.PARMLIB and the active PARMLIB concatenation is limited
+      to systems programmers
+    cis:
+      section: 2.1.9
+      level: L1
+      benchmark: CIS z/OS 2.5.0
+    stig:
+      rule_id: V-223697
+      severity: high
+    data_sources_needed:
+    - irrdbu00
+    - parmlib_list
+    implementation:
+      engine: python
+      dataset: irrdbu00.datasets
+      logic: |
+        import re
+
+        libraries = parmlib_list
+        ranks = {'NONE': 0, 'EXECUTE': 1, 'READ': 2, 'UPDATE': 3, 'CONTROL': 4, 'ALTER': 5}
+        audit_required = True
+        required_audit_threshold = 'UPDATE'
+        user_ids = set(irrdbu00.users['USBD_NAME'].astype(str).str.upper())
+        group_ids = set(irrdbu00.groups['GPBD_NAME'].astype(str).str.upper())
+        all_profiles = irrdbu00.datasets
+        all_access = irrdbu00.datasetAccess
+
+        def auth_type(value):
+            auth_id = str(value).upper()
+            if auth_id in user_ids:
+                return 'USER'
+            if auth_id in group_ids:
+                return 'GROUP'
+            return 'UNRESOLVED'
+
+        def matches(pattern, value):
+            expression = re.escape(str(pattern))
+            expression = expression.replace(r'\*\*', '.*')
+            expression = expression.replace(r'\*', '[^.]*').replace('%', '[^.]')
+            return re.fullmatch(expression, value) is not None
+
+        hard_issues = []
+        review_access = {}
+        for library in libraries:
+            profiles = all_profiles[all_profiles['DSBD_NAME'] == library].copy()
+            if profiles.empty:
+                candidates = all_profiles[
+                    all_profiles['DSBD_NAME'].map(
+                        lambda pattern: matches(pattern, library)
+                    )
+                ].copy()
+                if not candidates.empty:
+                    candidates['_specificity'] = candidates['DSBD_NAME'].str.replace(
+                        '*', '', regex=False
+                    ).str.replace('%', '', regex=False).str.len()
+                    best = candidates['_specificity'].max()
+                    profiles = candidates[candidates['_specificity'] == best].copy()
+
+            if profiles.empty:
+                hard_issues.append(f'{library}: no covering RACF profile')
+                continue
+
+            for _, profile in profiles.iterrows():
+                uacc = str(profile['DSBD_UACC']).upper()
+                level = str(profile['DSBD_AUDIT_LEVEL']).upper()
+                okqual = str(profile['DSBD_AUDIT_OKQUAL']).upper()
+                if ranks.get(uacc, 99) > ranks['NONE']:
+                    hard_issues.append(f'{library}: UACC={uacc}')
+                if audit_required and not (
+                    level == 'ALL' and
+                    ranks.get(okqual, 99) <= ranks[required_audit_threshold]
+                ):
+                    hard_issues.append(
+                        f'{library}: AUDIT={level}({okqual or "NONE"})'
+                    )
+
+                related = all_access[
+                    (all_access['DSACC_NAME'] == profile['DSBD_NAME']) &
+                    (
+                        all_access['DSACC_ACCESS'].map(
+                            lambda value: ranks.get(str(value).upper(), -1)
+                        ) >= ranks['UPDATE']
+                    )
+                ]
+                for _, permit in related.iterrows():
+                    auth_id = str(permit['DSACC_AUTH_ID']).upper()
+                    access = str(permit['DSACC_ACCESS']).upper()
+                    item = review_access.setdefault(auth_id, {
+                        'auth_type': auth_type(auth_id),
+                        'max_access': access,
+                        'libraries': set(),
+                    })
+                    if ranks.get(access, -1) > ranks.get(item['max_access'], -1):
+                        item['max_access'] = access
+                    item['libraries'].add(library)
+
+        sysprog = {str(x).upper() for x in sysprog_list} if sysprog_list else None
+
+        def _approved(auth_id):
+            if sysprog is None:
+                return 'UNREVIEWED'
+            return 'YES' if str(auth_id).upper() in sysprog else 'NO'
+
+        findings = [
+            {
+                'AUTH_ID': auth_id,
+                'AUTH_TYPE': item['auth_type'],
+                'MAX_ACCESS': item['max_access'],
+                'LIBRARY_COUNT': len(item['libraries']),
+                'LIBRARIES': ', '.join(sorted(item['libraries'])),
+                'APPROVED': _approved(auth_id),
+            }
+            for auth_id, item in sorted(review_access.items())
+        ]
+        unapproved = [f for f in findings if f['APPROVED'] != 'YES']
+
+        hard_issues = sorted(set(hard_issues))
+        if hard_issues:
+            status = 'REVIEW'
+            detail = (
+                f'{len(hard_issues)} PARMLIB protection issue(s): ' +
+                '; '.join(hard_issues[:10]) +
+                ('; ...' if len(hard_issues) > 10 else '') +
+                f'; {len(unapproved)} unique UPDATE-or-greater '
+                'user/group ID(s) require validation'
+            )
+        elif unapproved:
+            status = 'REVIEW'
+            detail = (
+                f'PARMLIB profile settings meet technical thresholds; validate '
+                f'{len(unapproved)} unique UPDATE-or-greater '
+                'user/group ID(s) not in the system-programmer list'
+            )
+        elif findings:
+            status = 'PASS'
+            detail = (
+                f'PARMLIB write access is limited to {len(findings)} approved '
+                'system-programmer ID(s)'
+            )
+        else:
+            status = 'PASS'
+            detail = f'All {len(libraries)} PARMLIB entries meet the technical thresholds'
+      assertion:
+        type: python_result
+        pass_message: All PARMLIB libraries restrict WRITE-or-greater access appropriately
+        fail_message: PARMLIB library protection issues or unreviewed WRITE-or-greater access found
+    remediation: For each PARMLIB data set flagged, restrict WRITE (UPDATE) or greater access to systems
+      programming personnel only, set UACC(NONE), define a covering RACF data set profile where missing
+      and enable AUDIT(ALL(UPDATE)). Review each listed user/group ID against approved roles and remove
+      access that is not justified.
+  - control_id: CIS-2.1.10
+    title: Ensure WRITE or greater access to system PROCLIB libraries is limited to systems programmers
+    cis:
+      section: 2.1.10
+      level: L1
+      benchmark: CIS z/OS 2.5.0
+    stig:
+      rule_id: V-223687
+      severity: high
+    data_sources_needed:
+    - irrdbu00
+    - proclib_list
+    implementation:
+      engine: python
+      dataset: irrdbu00.datasets
+      logic: |
+        import re
+
+        libraries = proclib_list
+        ranks = {'NONE': 0, 'EXECUTE': 1, 'READ': 2, 'UPDATE': 3, 'CONTROL': 4, 'ALTER': 5}
+        audit_required = False
+        required_audit_threshold = 'NONE'
+        user_ids = set(irrdbu00.users['USBD_NAME'].astype(str).str.upper())
+        group_ids = set(irrdbu00.groups['GPBD_NAME'].astype(str).str.upper())
+        all_profiles = irrdbu00.datasets
+        all_access = irrdbu00.datasetAccess
+
+        def auth_type(value):
+            auth_id = str(value).upper()
+            if auth_id in user_ids:
+                return 'USER'
+            if auth_id in group_ids:
+                return 'GROUP'
+            return 'UNRESOLVED'
+
+        def matches(pattern, value):
+            expression = re.escape(str(pattern))
+            expression = expression.replace(r'\*\*', '.*')
+            expression = expression.replace(r'\*', '[^.]*').replace('%', '[^.]')
+            return re.fullmatch(expression, value) is not None
+
+        hard_issues = []
+        review_access = {}
+        for library in libraries:
+            profiles = all_profiles[all_profiles['DSBD_NAME'] == library].copy()
+            if profiles.empty:
+                candidates = all_profiles[
+                    all_profiles['DSBD_NAME'].map(
+                        lambda pattern: matches(pattern, library)
+                    )
+                ].copy()
+                if not candidates.empty:
+                    candidates['_specificity'] = candidates['DSBD_NAME'].str.replace(
+                        '*', '', regex=False
+                    ).str.replace('%', '', regex=False).str.len()
+                    best = candidates['_specificity'].max()
+                    profiles = candidates[candidates['_specificity'] == best].copy()
+
+            if profiles.empty:
+                hard_issues.append(f'{library}: no covering RACF profile')
+                continue
+
+            for _, profile in profiles.iterrows():
+                uacc = str(profile['DSBD_UACC']).upper()
+                level = str(profile['DSBD_AUDIT_LEVEL']).upper()
+                okqual = str(profile['DSBD_AUDIT_OKQUAL']).upper()
+                if ranks.get(uacc, 99) > ranks['NONE']:
+                    hard_issues.append(f'{library}: UACC={uacc}')
+                if audit_required and not (
+                    level == 'ALL' and
+                    ranks.get(okqual, 99) <= ranks[required_audit_threshold]
+                ):
+                    hard_issues.append(
+                        f'{library}: AUDIT={level}({okqual or "NONE"})'
+                    )
+
+                related = all_access[
+                    (all_access['DSACC_NAME'] == profile['DSBD_NAME']) &
+                    (
+                        all_access['DSACC_ACCESS'].map(
+                            lambda value: ranks.get(str(value).upper(), -1)
+                        ) >= ranks['UPDATE']
+                    )
+                ]
+                for _, permit in related.iterrows():
+                    auth_id = str(permit['DSACC_AUTH_ID']).upper()
+                    access = str(permit['DSACC_ACCESS']).upper()
+                    item = review_access.setdefault(auth_id, {
+                        'auth_type': auth_type(auth_id),
+                        'max_access': access,
+                        'libraries': set(),
+                    })
+                    if ranks.get(access, -1) > ranks.get(item['max_access'], -1):
+                        item['max_access'] = access
+                    item['libraries'].add(library)
+
+        sysprog = {str(x).upper() for x in sysprog_list} if sysprog_list else None
+
+        def _approved(auth_id):
+            if sysprog is None:
+                return 'UNREVIEWED'
+            return 'YES' if str(auth_id).upper() in sysprog else 'NO'
+
+        findings = [
+            {
+                'AUTH_ID': auth_id,
+                'AUTH_TYPE': item['auth_type'],
+                'MAX_ACCESS': item['max_access'],
+                'LIBRARY_COUNT': len(item['libraries']),
+                'LIBRARIES': ', '.join(sorted(item['libraries'])),
+                'APPROVED': _approved(auth_id),
+            }
+            for auth_id, item in sorted(review_access.items())
+        ]
+        unapproved = [f for f in findings if f['APPROVED'] != 'YES']
+
+        hard_issues = sorted(set(hard_issues))
+        if hard_issues:
+            status = 'REVIEW'
+            detail = (
+                f'{len(hard_issues)} PROCLIB protection issue(s): ' +
+                '; '.join(hard_issues[:10]) +
+                ('; ...' if len(hard_issues) > 10 else '') +
+                f'; {len(unapproved)} unique UPDATE-or-greater '
+                'user/group ID(s) require validation'
+            )
+        elif unapproved:
+            status = 'REVIEW'
+            detail = (
+                f'PROCLIB profile settings meet technical thresholds; validate '
+                f'{len(unapproved)} unique UPDATE-or-greater '
+                'user/group ID(s) not in the system-programmer list'
+            )
+        elif findings:
+            status = 'PASS'
+            detail = (
+                f'PROCLIB write access is limited to {len(findings)} approved '
+                'system-programmer ID(s)'
+            )
+        else:
+            status = 'PASS'
+            detail = f'All {len(libraries)} PROCLIB entries meet the technical thresholds'
+      assertion:
+        type: python_result
+        pass_message: All PROCLIB libraries restrict WRITE-or-greater access appropriately
+        fail_message: PROCLIB library protection issues or unreviewed WRITE-or-greater access found
+    remediation: For each PROCLIB data set flagged, restrict WRITE (UPDATE) or greater access to systems
+      programming personnel only, set UACC(NONE), define a covering RACF data set profile where missing.
+      Review each listed user/group ID against approved roles and remove access that is not justified.
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # SECTION 2.2 – RESOURCE PROTECTION
   # ─────────────────────────────────────────────────────────────────────────────
 
@@ -584,31 +1043,35 @@ controls:
       rule_id: V-223778
       severity: medium
       requirement_excerpt: >
-        The old RACF dataset-level PASSWORD field is a legacy mechanism that
-        must not be used. SETROPTS NOPASSWORD ensures this is enforced.
+        The legacy OS/RACF dataset-level PASSWORD facility must not be used;
+        data sets must be protected by RACF profiles instead.
     cis:
       section: "2.2.4"
       level: L1
       benchmark: "CIS z/OS 2.5.0"
-    data_sources_needed: [setropts]
+    data_sources_needed: []
     implementation:
       engine: python
-      dataset: setropts.fieldInfo
-      select_columns: [Setting, Value]
+      dataset: ""
       logic: |
-        # TAPEDSN=FALSE means tape password protection is off (desired)
-        row = df.loc[df['Setting'] == 'TAPEDSN', 'Value']
-        val = str(row.values[0]).upper() if len(row) > 0 else 'FALSE'
-        status = 'PASS' if val == 'FALSE' else 'FAIL'
-        detail = f"TAPEDSN={val} (should be FALSE)"
-        findings = [{'Setting': 'TAPEDSN', 'Value': val}]
+        # Legacy dataset (OS) PASSWORD protection is recorded in the catalog/VTOC,
+        # not in SETROPTS or the IRRDBU00 unload, so it cannot be evaluated from
+        # the available evidence. Surface this as a manual review item.
+        status = 'REVIEW'
+        detail = (
+            "Manual review required: verify no data sets rely on the legacy "
+            "dataset PASSWORD facility (LISTDSD / catalog PASSWORD attribute). "
+            "This is not represented in SETROPTS or the IRRDBU00 unload."
+        )
+        findings = []
       assertion:
         type: python_result
-        pass_message: "Tape dataset password protection is not in use (TAPEDSN=FALSE)"
-        fail_message: "Tape dataset password protection is active (TAPEDSN={value})"
+        pass_message: "No datasets rely on legacy PASSWORD protection"
+        fail_message: "Dataset PASSWORD protection is in use"
     remediation: >
-      Issue: SETROPTS NOTAPEDSN
-      Remove any dataset profiles relying on the PASSWORD field.
+      For any data set found using the legacy PASSWORD attribute, remove it and
+      protect the data set with a RACF data set profile instead
+      (for example: ADDSD '<dataset>' UACC(NONE) and appropriate PERMITs).
 
   # ─────────────────────────────────────────────────────────────────────────────
   # SECTION 2.3 – SYSTEM SETTINGS
@@ -759,13 +1222,21 @@ controls:
       dataset: irrdbu00.userOMVS + irrdbu00.users
       select_columns: [USOMVS_NAME, USOMVS_UID, USBD_NOPWD]
       logic: |
-        uid0 = omvs_df[omvs_df['USOMVS_UID'] == '0'][['USOMVS_NAME','USOMVS_UID']]
+        # USOMVS_UID is a zero-padded string (e.g. '0000000000'), so compare numerically.
+        uid0 = omvs_df[pd.to_numeric(omvs_df['USOMVS_UID'], errors='coerce') == 0][['USOMVS_NAME','USOMVS_UID']]
         merged = uid0.merge(users_df[['USBD_NAME','USBD_NOPWD']], left_on='USOMVS_NAME', right_on='USBD_NAME', how='left')
-        not_protected = merged[merged['USBD_NOPWD'] != 'YES']
-        findings = not_protected[['USOMVS_NAME','USOMVS_UID','USBD_NOPWD']].to_dict('records')
+        # USBD_NOPWD == 'PRO' means PROTECTED (no password, no passphrase).
+        # 'NO' = has a password, 'PHR' = has a passphrase; both are interactive-
+        # capable so neither is protected.
+        not_protected = merged[merged['USBD_NOPWD'] != 'PRO'].copy()
+        _reason = {'NO': 'has password', 'PHR': 'has passphrase', 'PRO': 'protected'}
+        not_protected['REASON'] = not_protected['USBD_NOPWD'].map(
+            lambda v: _reason.get(v, 'undefined / no user profile')
+        )
+        findings = not_protected[['USOMVS_NAME','USOMVS_UID','USBD_NOPWD','REASON']].to_dict('records')
         count = len(not_protected)
         status = 'PASS' if count == 0 else 'FAIL'
-        detail = f"{count} UID(0) user(s) that are NOT PROTECTED"
+        detail = f"{count} UID(0) user(s) that are NOT PROTECTED (have a password or passphrase)"
       assertion:
         type: python_result
         pass_message: "All UID(0) accounts are PROTECTED"
@@ -1255,11 +1726,14 @@ controls:
             users_df[['USBD_NAME','USBD_NOPWD']],
             left_on='GRST_USER_ID', right_on='USBD_NAME', how='left'
         )
-        not_protected = merged[merged['USBD_NOPWD'] != 'YES'][['GRST_NAME','GRST_USER_ID','USBD_NOPWD']]
+        # USBD_NOPWD == 'PRO' means PROTECTED (no password and no passphrase).
+        # 'NO' = has a password, 'PHR' = has a passphrase, NaN = user ID not
+        # defined in RACF. Anything other than 'PRO' is not a protected user.
+        not_protected = merged[merged['USBD_NOPWD'] != 'PRO'][['GRST_NAME','GRST_USER_ID','USBD_NOPWD']]
         findings = not_protected.to_dict('records')
         count = len(not_protected)
         status = 'PASS' if count == 0 else 'FAIL'
-        detail = f"{count} STARTED profile(s) whose user ID is not PROTECTED"
+        detail = f"{count} STARTED profile(s) whose user ID is not PROTECTED or is undefined"
       assertion:
         type: python_result
         pass_message: "All STARTED profile user IDs are PROTECTED"
